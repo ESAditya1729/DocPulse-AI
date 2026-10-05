@@ -3,15 +3,17 @@
 from pathlib import Path
 
 import typer
-from rich.console import Console
+from rich.console import Console, Group
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.table import Table
+from rich.text import Text
 
 from docpulse import __version__
 from docpulse.config import Config, load_config, save_config
 from docpulse.llm import ICAGatewayClient
+from docpulse.mathbox import prettify_math, split_segments
 from docpulse.parsers import parse_document
 from docpulse.prompts import (
     ANALYZE_PROMPT,
@@ -33,6 +35,32 @@ def version_callback(value: bool):
     if value:
         console.print(f"[bold cyan]DocPulse[/bold cyan] version [green]{__version__}[/green]")
         raise typer.Exit()
+
+
+def render_markdown_with_equations(markdown_text: str) -> Markdown | Group:
+    """Render LLM markdown, boxing each $...$ / $$...$$ equation in place.
+
+    Equations are embedded as their own small Panel exactly where they occur
+    in the text, rather than being pulled out to a separate section.
+    """
+    segments = split_segments(markdown_text)
+    if not any(kind == "math" for kind, _ in segments):
+        return Markdown(markdown_text)
+
+    parts = []
+    for kind, chunk in segments:
+        if kind == "math":
+            parts.append(
+                Panel(
+                    Text(prettify_math(chunk), justify="center", style="bold white"),
+                    border_style="magenta",
+                    expand=False,
+                    padding=(0, 2),
+                )
+            )
+        elif chunk.strip():
+            parts.append(Markdown(chunk))
+    return Group(*parts)
 
 
 @app.callback()
@@ -180,7 +208,7 @@ def analyze(
     else:
         console.print(
             Panel(
-                Markdown(result),
+                render_markdown_with_equations(result),
                 title=f"Analysis: {parsed.file_name}",
                 border_style="green",
                 expand=False,
@@ -225,7 +253,7 @@ def section(
 
     console.print(
         Panel(
-            Markdown(result),
+            render_markdown_with_equations(result),
             title=f"Section {sec.id}: {sec.title}",
             border_style="cyan",
             expand=False,
@@ -258,7 +286,7 @@ def sources(
 
     console.print(
         Panel(
-            Markdown(result),
+            render_markdown_with_equations(result),
             title=f"Sources & Citations: {parsed.file_name}",
             border_style="yellow",
             expand=False,
