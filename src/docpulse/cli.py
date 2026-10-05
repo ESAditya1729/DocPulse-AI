@@ -1,5 +1,6 @@
 """Command-Line Interface for DocPulse."""
 
+from collections.abc import Callable
 from pathlib import Path
 
 import typer
@@ -11,13 +12,17 @@ from rich.table import Table
 from rich.text import Text
 
 from docpulse import __version__
+from docpulse.cache import get_cached_or_generate
 from docpulse.config import Config, load_config, save_config
 from docpulse.llm import ICAGatewayClient
+from docpulse.longdoc import prepare_content
 from docpulse.mathbox import prettify_math, split_segments
 from docpulse.parsers import parse_document
 from docpulse.prompts import (
     ANALYZE_PROMPT,
+    ASK_FIRST_PROMPT,
     EXPORT_PROMPT,
+    MAP_PROMPT,
     SECTION_PROMPT,
     SOURCES_PROMPT,
     SYSTEM_PROMPT,
@@ -61,6 +66,60 @@ def render_markdown_with_equations(markdown_text: str) -> Markdown | Group:
         elif chunk.strip():
             parts.append(Markdown(chunk))
     return Group(*parts)
+
+
+def generate_from_document(
+    client: ICAGatewayClient,
+    config: Config,
+    source_text: str,
+    build_prompt: Callable[[str], str],
+    *,
+    status_label: str,
+    no_cache: bool,
+) -> tuple[str, bool]:
+    """Prepare source_text (chunking it if large) and run the final LLM call.
+
+    Returns (result, was_cached). Printed notices cover chunking, truncation
+    (document exceeded the chunk cap), and cache hits - the three things that
+    used to happen silently.
+    """
+
+    def map_chunk(chunk: str, index: int, total: int) -> str:
+        content, _ = get_cached_or_generate(
+            client,
+            config,
+            system_prompt=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": MAP_PROMPT.format(index=index, total=total, content=chunk)}],
+            use_cache=not no_cache,
+        )
+        return content
+
+    prepared = prepare_content(
+        map_chunk,
+        source_text,
+        on_progress=lambda i, n: console.print(f"[dim]Summarizing excerpt {i}/{n}...[/dim]"),
+    )
+    if prepared.chunked:
+        console.print(f"[dim]Large document - condensed from {prepared.chunk_count} chunks for full coverage.[/dim]")
+    if prepared.truncated:
+        console.print(
+            f"[yellow]Warning:[/yellow] document exceeds the {prepared.chunk_count}-chunk limit; "
+            "trailing content was not analyzed."
+        )
+
+    with console.status(status_label, spinner="dots"):
+        result, was_cached = get_cached_or_generate(
+            client,
+            config,
+            system_prompt=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": build_prompt(prepared.text)}],
+            use_cache=not no_cache,
+        )
+
+    if was_cached:
+        console.print("[dim]⚡ Served from cache (use --no-cache to force a fresh run).[/dim]")
+
+    return result, was_cached
 
 
 @app.callback()
@@ -167,9 +226,11 @@ def init():
 def analyze(
     doc: Path = typer.Argument(..., help="Path to document (PDF, Markdown, or text file)", exists=True),
     raw: bool = typer.Option(False, "--raw", help="Output raw response instead of formatted Markdown panel"),
+    no_cache: bool = typer.Option(False, "--no-cache", help="Bypass the response cache and force a fresh LLM call"),
 ):
     """Analyze a document for prerequisites, core topics, and executive summary."""
     config = load_config()
+    client = ICAGatewayClient(config)
     with console.status(f"[bold cyan]Parsing {doc.name}...", spinner="bouncingBar"):
         parsed = parse_document(doc)
 
@@ -188,20 +249,18 @@ def analyze(
     console.print(table)
     console.print()
 
-    # Truncate content preview if document is extremely large for context limits
-    content_to_analyze = parsed.raw_text[:16000]
-
-    with console.status("[bold green]Generating document breakdown with LLM...", spinner="dots"):
-        client = ICAGatewayClient(config)
-        try:
-            resp = client.chat_complete(
-                system_prompt=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": ANALYZE_PROMPT.format(content=content_to_analyze)}],
-            )
-            result = resp.content
-        except Exception as e:  # noqa: BLE001 - CLI boundary: turn any failure into a friendly message
-            console.print(f"[bold red]Error communicating with LLM Gateway:[/bold red] {e}")
-            raise typer.Exit(1) from e
+    try:
+        result, _ = generate_from_document(
+            client,
+            config,
+            parsed.raw_text,
+            lambda content: ANALYZE_PROMPT.format(content=content),
+            status_label="[bold green]Generating document breakdown with LLM...",
+            no_cache=no_cache,
+        )
+    except Exception as e:  # noqa: BLE001 - CLI boundary: turn any failure into a friendly message
+        console.print(f"[bold red]Error communicating with LLM Gateway:[/bold red] {e}")
+        raise typer.Exit(1) from e
 
     if raw:
         console.print(result)
@@ -220,9 +279,11 @@ def analyze(
 def section(
     doc: Path = typer.Argument(..., help="Path to document file", exists=True),
     sec_id: int = typer.Option(..., "--id", "-i", help="ID of the section to analyze"),
+    no_cache: bool = typer.Option(False, "--no-cache", help="Bypass the response cache and force a fresh LLM call"),
 ):
     """Perform a focused, in-depth analysis on a specific section by ID."""
     config = load_config()
+    client = ICAGatewayClient(config)
     with console.status(f"[bold cyan]Indexing {doc.name}...", spinner="bouncingBar"):
         parsed = parse_document(doc)
 
@@ -234,22 +295,18 @@ def section(
 
     console.print(f"[cyan]Selected Section [{sec.id}]:[/cyan] [bold]{sec.title}[/bold]")
 
-    with console.status(f"[bold green]Analyzing section {sec_id}...", spinner="dots"):
-        client = ICAGatewayClient(config)
-        try:
-            resp = client.chat_complete(
-                system_prompt=SYSTEM_PROMPT,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": SECTION_PROMPT.format(title=sec.title, content=sec.content or sec.title),
-                    }
-                ],
-            )
-            result = resp.content
-        except Exception as e:  # noqa: BLE001 - CLI boundary: turn any failure into a friendly message
-            console.print(f"[bold red]Error communicating with LLM Gateway:[/bold red] {e}")
-            raise typer.Exit(1) from e
+    try:
+        result, _ = generate_from_document(
+            client,
+            config,
+            sec.content or sec.title,
+            lambda content: SECTION_PROMPT.format(title=sec.title, content=content),
+            status_label=f"[bold green]Analyzing section {sec_id}...",
+            no_cache=no_cache,
+        )
+    except Exception as e:  # noqa: BLE001 - CLI boundary: turn any failure into a friendly message
+        console.print(f"[bold red]Error communicating with LLM Gateway:[/bold red] {e}")
+        raise typer.Exit(1) from e
 
     console.print(
         Panel(
@@ -264,25 +321,26 @@ def section(
 @app.command()
 def sources(
     doc: Path = typer.Argument(..., help="Path to document file", exists=True),
+    no_cache: bool = typer.Option(False, "--no-cache", help="Bypass the response cache and force a fresh LLM call"),
 ):
     """Extract external references, cited papers, and code repositories."""
     config = load_config()
+    client = ICAGatewayClient(config)
     with console.status(f"[bold cyan]Parsing {doc.name}...", spinner="bouncingBar"):
         parsed = parse_document(doc)
 
-    content = parsed.raw_text[:16000]
-
-    with console.status("[bold green]Extracting citations, repositories & links...", spinner="dots"):
-        client = ICAGatewayClient(config)
-        try:
-            resp = client.chat_complete(
-                system_prompt=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": SOURCES_PROMPT.format(content=content)}],
-            )
-            result = resp.content
-        except Exception as e:  # noqa: BLE001 - CLI boundary: turn any failure into a friendly message
-            console.print(f"[bold red]Error communicating with LLM Gateway:[/bold red] {e}")
-            raise typer.Exit(1) from e
+    try:
+        result, _ = generate_from_document(
+            client,
+            config,
+            parsed.raw_text,
+            lambda content: SOURCES_PROMPT.format(content=content),
+            status_label="[bold green]Extracting citations, repositories & links...",
+            no_cache=no_cache,
+        )
+    except Exception as e:  # noqa: BLE001 - CLI boundary: turn any failure into a friendly message
+        console.print(f"[bold red]Error communicating with LLM Gateway:[/bold red] {e}")
+        raise typer.Exit(1) from e
 
     console.print(
         Panel(
@@ -299,33 +357,145 @@ def export(
     doc: Path = typer.Argument(..., help="Path to document file", exists=True),
     format: str = typer.Option("md", "--format", "-f", help="Output format (currently 'md')"),
     output: Path | None = typer.Option(None, "--output", "-o", help="Target output file path"),
+    no_cache: bool = typer.Option(False, "--no-cache", help="Bypass the response cache and force a fresh LLM call"),
 ):
     """Generate a comprehensive study guide / README from the document."""
     config = load_config()
+    client = ICAGatewayClient(config)
     with console.status(f"[bold cyan]Parsing {doc.name}...", spinner="bouncingBar"):
         parsed = parse_document(doc)
 
-    content = parsed.raw_text[:16000]
-
-    with console.status("[bold green]Synthesizing study guide...", spinner="dots"):
-        client = ICAGatewayClient(config)
-        try:
-            resp = client.chat_complete(
-                system_prompt=SYSTEM_PROMPT,
-                messages=[
-                    {"role": "user", "content": EXPORT_PROMPT.format(doc_name=parsed.file_name, content=content)}
-                ],
-            )
-            result = resp.content
-        except Exception as e:  # noqa: BLE001 - CLI boundary: turn any failure into a friendly message
-            console.print(f"[bold red]Error communicating with LLM Gateway:[/bold red] {e}")
-            raise typer.Exit(1) from e
+    try:
+        result, _ = generate_from_document(
+            client,
+            config,
+            parsed.raw_text,
+            lambda content: EXPORT_PROMPT.format(doc_name=parsed.file_name, content=content),
+            status_label="[bold green]Synthesizing study guide...",
+            no_cache=no_cache,
+        )
+    except Exception as e:  # noqa: BLE001 - CLI boundary: turn any failure into a friendly message
+        console.print(f"[bold red]Error communicating with LLM Gateway:[/bold red] {e}")
+        raise typer.Exit(1) from e
 
     target_path = output or Path(f"{doc.stem}_study_guide.md")
     with open(target_path, "w", encoding="utf-8") as f:
         f.write(result)
 
     console.print(f"[bold green]✓ Study guide exported successfully to:[/bold green] [cyan]{target_path}[/cyan]")
+
+
+@app.command()
+def ask(
+    doc: Path = typer.Argument(..., help="Path to document file", exists=True),
+    question: str | None = typer.Argument(
+        None, help="Ask a single question and exit; omit it for an interactive session"
+    ),
+    sec_id: int | None = typer.Option(
+        None, "--id", "-i", help="Restrict Q&A to one section instead of the whole document"
+    ),
+    no_cache: bool = typer.Option(False, "--no-cache", help="Bypass the response cache and force a fresh LLM call"),
+):
+    """Ask follow-up questions about a document, one-shot or interactively."""
+    config = load_config()
+    client = ICAGatewayClient(config)
+    with console.status(f"[bold cyan]Parsing {doc.name}...", spinner="bouncingBar"):
+        parsed = parse_document(doc)
+
+    if sec_id is not None:
+        sec = parsed.get_section_by_id(sec_id)
+        if not sec:
+            console.print(f"[bold red]Error:[/bold red] Section ID [yellow]{sec_id}[/yellow] not found.")
+            console.print(f"Available section IDs: {[s.id for s in parsed.sections]}")
+            raise typer.Exit(1)
+        doc_label = f"{parsed.file_name} (section {sec.id}: {sec.title})"
+        source_text = sec.content or sec.title
+    else:
+        doc_label = parsed.file_name
+        source_text = parsed.raw_text
+
+    def map_chunk(chunk: str, index: int, total: int) -> str:
+        content, _ = get_cached_or_generate(
+            client,
+            config,
+            system_prompt=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": MAP_PROMPT.format(index=index, total=total, content=chunk)}],
+            use_cache=not no_cache,
+        )
+        return content
+
+    with console.status("[bold cyan]Preparing document context...", spinner="dots"):
+        prepared = prepare_content(
+            map_chunk,
+            source_text,
+            on_progress=lambda i, n: console.print(f"[dim]Summarizing excerpt {i}/{n}...[/dim]"),
+        )
+    if prepared.chunked:
+        console.print(f"[dim]Large document - condensed from {prepared.chunk_count} chunks for Q&A context.[/dim]")
+    if prepared.truncated:
+        console.print(
+            f"[yellow]Warning:[/yellow] document exceeds the {prepared.chunk_count}-chunk limit; "
+            "trailing content was not included."
+        )
+
+    messages: list[dict[str, str]] = []
+    first_turn = True
+
+    def ask_once(user_question: str) -> tuple[str, bool]:
+        nonlocal first_turn
+        if first_turn:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": ASK_FIRST_PROMPT.format(
+                        doc_name=doc_label, content=prepared.text, question=user_question
+                    ),
+                }
+            )
+            first_turn = False
+        else:
+            messages.append({"role": "user", "content": user_question})
+
+        answer, was_cached = get_cached_or_generate(
+            client, config, system_prompt=SYSTEM_PROMPT, messages=messages, use_cache=not no_cache
+        )
+        messages.append({"role": "assistant", "content": answer})
+        return answer, was_cached
+
+    def print_answer(answer: str, was_cached: bool) -> None:
+        console.print(
+            Panel(render_markdown_with_equations(answer), title="Answer", border_style="blue", expand=False)
+        )
+        if was_cached:
+            console.print("[dim]⚡ Served from cache (use --no-cache to force a fresh run).[/dim]")
+
+    if question:
+        try:
+            answer, was_cached = ask_once(question)
+        except Exception as e:  # noqa: BLE001 - CLI boundary: turn any failure into a friendly message
+            console.print(f"[bold red]Error communicating with LLM Gateway:[/bold red] {e}")
+            raise typer.Exit(1) from e
+        print_answer(answer, was_cached)
+        return
+
+    console.print(f"[bold cyan]Ask questions about {doc_label}.[/bold cyan] Type 'exit' or 'quit' to stop.")
+    while True:
+        try:
+            user_question = Prompt.ask("[bold green]You[/bold green]")
+        except (EOFError, KeyboardInterrupt):
+            console.print()
+            break
+
+        stripped = user_question.strip()
+        if not stripped or stripped.lower() in {"exit", "quit"}:
+            break
+
+        try:
+            answer, was_cached = ask_once(stripped)
+        except Exception as e:  # noqa: BLE001 - CLI boundary: turn any failure into a friendly message
+            console.print(f"[bold red]Error communicating with LLM Gateway:[/bold red] {e}")
+            continue
+        print_answer(answer, was_cached)
 
 
 if __name__ == "__main__":

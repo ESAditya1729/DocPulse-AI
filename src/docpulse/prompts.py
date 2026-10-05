@@ -73,6 +73,26 @@ Output format (Markdown):
 (List datasets or write 'None explicitly cited')
 """
 
+MAP_PROMPT = """You are condensing part {index} of {total} of a larger document into dense notes for later synthesis.
+Preserve concrete facts, definitions, equations (verbatim), names, numbers, and arguments. Do not add commentary,
+do not omit specifics for brevity, and do not try to summarize the whole document - just this excerpt.
+Output plain condensed notes only, no headers, no meta-commentary.
+
+Excerpt:
+\"\"\"{content}\"\"\"
+"""
+
+ASK_FIRST_PROMPT = """You will answer follow-up questions about the document below across multiple turns.
+Read it carefully, then answer ONLY the question at the end. Keep answers focused, cite section titles or
+specific details when relevant, and say clearly if the document doesn't contain the answer.
+
+Document: {doc_name}
+Document Content:
+\"\"\"{content}\"\"\"
+
+Question: {question}
+"""
+
 EXPORT_PROMPT = """Generate a comprehensive Study Guide / README in Markdown based on the provided document content.
 
 Document Title: {doc_name}
