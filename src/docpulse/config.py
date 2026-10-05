@@ -14,8 +14,8 @@ class Config(BaseModel):
     """DocPulse runtime configuration."""
 
     endpoint_url: str = Field(
-        default="https://api.nextgen-beta.ica.ibm.com/ica/v1",
-        description="IBM ICA Gateway endpoint URL",
+        default="",
+        description="IBM ICA Gateway endpoint URL (set via 'docpulse init' or DOCPULSE_ENDPOINT_URL/ICA_ENDPOINT_URL)",
     )
     api_key: str = Field(
         default="",

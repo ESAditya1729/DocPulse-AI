@@ -7,7 +7,7 @@ import typer
 from rich.console import Console, Group
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.prompt import Prompt
+from rich.prompt import Confirm, Prompt
 from rich.table import Table
 from rich.text import Text
 
@@ -179,21 +179,34 @@ def init():
     except Exception:  # noqa: BLE001 - best-effort probe; any failure just skips model discovery
         discovered_models = []
 
+    valid_model_ids = {m.get("id") or m.get("name") for m in discovered_models if isinstance(m, dict)} - {None}
+
     default_model = current_config.model_id
     if discovered_models:
         console.print(f"[cyan]Available models/assistants under '{namespace}':[/cyan]")
         for m in discovered_models[:15]:
             m_id = m.get("id") or m.get("name") if isinstance(m, dict) else str(m)
             console.print(f"  • [bold]{m_id}[/bold]")
-        if not default_model or default_model not in [m.get("id") for m in discovered_models if isinstance(m, dict)]:
+        if not default_model or default_model not in valid_model_ids:
             first_id = discovered_models[0].get("id") if isinstance(discovered_models[0], dict) else None
             if first_id:
                 default_model = first_id
 
-    model_id = Prompt.ask(
-        "Enter Model / Worker ID",
-        default=default_model or "ibm/granite-3-8b-instruct",
-    )
+    while True:
+        model_id = Prompt.ask(
+            "Enter Model / Worker ID",
+            default=default_model or "ibm/granite-3-8b-instruct",
+        ).strip()
+
+        if valid_model_ids and model_id not in valid_model_ids:
+            console.print(
+                f"[yellow]Warning:[/yellow] '{model_id}' wasn't in the models discovered for namespace "
+                f"'{namespace}' - it may belong to a different namespace or be mistyped."
+            )
+            if Confirm.ask("Use it anyway?", default=False):
+                break
+        else:
+            break
 
     new_config = Config(
         endpoint_url=endpoint_url.strip(),

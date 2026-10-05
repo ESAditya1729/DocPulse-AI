@@ -131,15 +131,50 @@ def test_cli_init_command(mock_client_cls, tmp_path, monkeypatch):
     mock_client = MagicMock()
     mock_client.check_health.return_value = {
         "status": "ok",
-        "endpoint": "https://api.nextgen-beta.ica.ibm.com/ica/v1/chat-models/models",
+        "endpoint": "https://gateway.example.com/v1/chat-models/models",
         "code": 200,
         "models_count": 5,
     }
     mock_client_cls.return_value = mock_client
 
     # Interactive inputs: endpoint, api_key, namespace, model_id
-    inputs = "https://api.nextgen-beta.ica.ibm.com/ica/v1\ntest-api-key\nchat-models\nibm/granite-3-8b-instruct\n"
+    inputs = "https://gateway.example.com/v1\ntest-api-key\nchat-models\nibm/granite-3-8b-instruct\n"
     result = runner.invoke(app, ["init"], input=inputs)
     assert result.exit_code == 0
     assert "Configuration saved" in result.output
     assert "Connection successful!" in result.output
+
+
+@patch("docpulse.cli.ICAGatewayClient")
+def test_cli_init_warns_on_unknown_model_but_allows_override(mock_client_cls, tmp_path, monkeypatch):
+    monkeypatch.setenv("DOCPULSE_CONFIG_PATH", str(tmp_path / "config.json"))
+
+    mock_client = MagicMock()
+    mock_client.list_models.return_value = [{"id": "known-model-a"}, {"id": "known-model-b"}]
+    mock_client.check_health.return_value = {"status": "ok", "endpoint": "https://gateway.example.com/v1", "code": 200}
+    mock_client_cls.return_value = mock_client
+
+    # endpoint, api_key, namespace, model_id (typo'd/unknown), confirm "use it anyway" = yes
+    inputs = "https://gateway.example.com/v1\ntest-api-key\nchat-models\ntypo-model\ny\n"
+    result = runner.invoke(app, ["init"], input=inputs)
+
+    assert result.exit_code == 0
+    assert "wasn't in the models discovered" in result.output
+    assert "Configuration saved" in result.output
+
+
+@patch("docpulse.cli.ICAGatewayClient")
+def test_cli_init_accepts_known_model_without_warning(mock_client_cls, tmp_path, monkeypatch):
+    monkeypatch.setenv("DOCPULSE_CONFIG_PATH", str(tmp_path / "config.json"))
+
+    mock_client = MagicMock()
+    mock_client.list_models.return_value = [{"id": "known-model-a"}, {"id": "known-model-b"}]
+    mock_client.check_health.return_value = {"status": "ok", "endpoint": "https://gateway.example.com/v1", "code": 200}
+    mock_client_cls.return_value = mock_client
+
+    inputs = "https://gateway.example.com/v1\ntest-api-key\nchat-models\nknown-model-a\n"
+    result = runner.invoke(app, ["init"], input=inputs)
+
+    assert result.exit_code == 0
+    assert "wasn't in the models discovered" not in result.output
+    assert "Configuration saved" in result.output
