@@ -20,12 +20,12 @@ class PDFParser(DocumentParser):
         for page_idx, page in enumerate(reader.pages, start=1):
             page_text = page.extract_text() or ""
             full_text_list.append(page_text)
-            
+
             # Simple heuristic for section breaks or page-based chunking
             lines = page_text.splitlines()
             current_title = f"Page {page_idx}"
             current_lines = []
-            
+
             for line in lines:
                 stripped = line.strip()
                 # Check for major heading pattern: e.g. "1. Introduction" or all caps short title

@@ -21,6 +21,12 @@ def test_cli_help():
     assert result.exit_code == 0
     assert "DocPulse" in result.output
     assert "analyze" in result.output
+    assert "concepts" in result.output
+    assert "prerequisites" in result.output
+    assert "equations" in result.output
+    assert "map" in result.output
+    assert "compare" in result.output
+    assert "study" in result.output
     assert "section" in result.output
     assert "sources" in result.output
     assert "export" in result.output
@@ -45,8 +51,8 @@ def test_cli_analyze_command(mock_client_cls, tmp_path):
 
 
 @patch("docpulse.cli.ICAGatewayClient")
-def test_cli_analyze_large_document_is_chunked_not_truncated(mock_client_cls, tmp_path, monkeypatch):
-    monkeypatch.setenv("DOCPULSE_CONFIG_PATH", str(tmp_path / "config.json"))
+def test_cli_analyze_large_document_is_chunked_not_truncated(mock_client_cls, tmp_path):
+    
     sample_file = tmp_path / "big.md"
     sample_file.write_text("# Title\n\n" + ("word " * 5000), encoding="utf-8")  # ~25000 chars, over the 16000 cutoff
 
@@ -69,8 +75,8 @@ def test_cli_analyze_large_document_is_chunked_not_truncated(mock_client_cls, tm
 
 
 @patch("docpulse.cli.ICAGatewayClient")
-def test_cli_analyze_second_run_served_from_cache(mock_client_cls, tmp_path, monkeypatch):
-    monkeypatch.setenv("DOCPULSE_CONFIG_PATH", str(tmp_path / "config.json"))
+def test_cli_analyze_second_run_served_from_cache(mock_client_cls, tmp_path):
+    
     sample_file = tmp_path / "test.md"
     sample_file.write_text("# Section 1\nHello World", encoding="utf-8")
 
@@ -89,8 +95,8 @@ def test_cli_analyze_second_run_served_from_cache(mock_client_cls, tmp_path, mon
 
 
 @patch("docpulse.cli.ICAGatewayClient")
-def test_cli_ask_one_shot(mock_client_cls, tmp_path, monkeypatch):
-    monkeypatch.setenv("DOCPULSE_CONFIG_PATH", str(tmp_path / "config.json"))
+def test_cli_ask_one_shot(mock_client_cls, tmp_path):
+    
     sample_file = tmp_path / "test.md"
     sample_file.write_text("# Section 1\nDocPulse uses Typer and Rich.", encoding="utf-8")
 
@@ -106,8 +112,8 @@ def test_cli_ask_one_shot(mock_client_cls, tmp_path, monkeypatch):
 
 
 @patch("docpulse.cli.ICAGatewayClient")
-def test_cli_ask_interactive_session(mock_client_cls, tmp_path, monkeypatch):
-    monkeypatch.setenv("DOCPULSE_CONFIG_PATH", str(tmp_path / "config.json"))
+def test_cli_ask_interactive_session(mock_client_cls, tmp_path):
+    
     sample_file = tmp_path / "test.md"
     sample_file.write_text("# Section 1\nDocPulse uses Typer and Rich.", encoding="utf-8")
 
@@ -124,10 +130,7 @@ def test_cli_ask_interactive_session(mock_client_cls, tmp_path, monkeypatch):
 
 
 @patch("docpulse.cli.ICAGatewayClient")
-def test_cli_init_command(mock_client_cls, tmp_path, monkeypatch):
-    custom_cfg_path = tmp_path / "config.json"
-    monkeypatch.setenv("DOCPULSE_CONFIG_PATH", str(custom_cfg_path))
-
+def test_cli_init_command(mock_client_cls, tmp_path):
     mock_client = MagicMock()
     mock_client.check_health.return_value = {
         "status": "ok",
@@ -146,8 +149,8 @@ def test_cli_init_command(mock_client_cls, tmp_path, monkeypatch):
 
 
 @patch("docpulse.cli.ICAGatewayClient")
-def test_cli_init_warns_on_unknown_model_but_allows_override(mock_client_cls, tmp_path, monkeypatch):
-    monkeypatch.setenv("DOCPULSE_CONFIG_PATH", str(tmp_path / "config.json"))
+def test_cli_init_warns_on_unknown_model_but_allows_override(mock_client_cls, tmp_path):
+    
 
     mock_client = MagicMock()
     mock_client.list_models.return_value = [{"id": "known-model-a"}, {"id": "known-model-b"}]
@@ -164,8 +167,8 @@ def test_cli_init_warns_on_unknown_model_but_allows_override(mock_client_cls, tm
 
 
 @patch("docpulse.cli.ICAGatewayClient")
-def test_cli_init_accepts_known_model_without_warning(mock_client_cls, tmp_path, monkeypatch):
-    monkeypatch.setenv("DOCPULSE_CONFIG_PATH", str(tmp_path / "config.json"))
+def test_cli_init_accepts_known_model_without_warning(mock_client_cls, tmp_path):
+    
 
     mock_client = MagicMock()
     mock_client.list_models.return_value = [{"id": "known-model-a"}, {"id": "known-model-b"}]
@@ -178,3 +181,173 @@ def test_cli_init_accepts_known_model_without_warning(mock_client_cls, tmp_path,
     assert result.exit_code == 0
     assert "wasn't in the models discovered" not in result.output
     assert "Configuration saved" in result.output
+
+
+@patch("docpulse.cli.ICAGatewayClient")
+def test_cli_concepts_command_text_and_json(mock_client_cls, tmp_path):
+    
+    sample_file = tmp_path / "test.md"
+    sample_file.write_text("# Attention Is All You Need\nExplaining multi-head attention.", encoding="utf-8")
+
+    mock_client = MagicMock()
+    mock_client.chat_complete.return_value = LLMResponse(
+        content='{"concepts": [{"name": "Multi-Head Attention", "importance": "high", "description": "Attends across subspaces", "sections": [1]}]}',
+        model="m",
+    )
+    mock_client_cls.return_value = mock_client
+
+    # Text mode
+    res_text = runner.invoke(app, ["concepts", str(sample_file)])
+    assert res_text.exit_code == 0
+    assert "Multi-Head Attention" in res_text.output
+
+    # JSON mode
+    res_json = runner.invoke(app, ["concepts", str(sample_file), "--format", "json"])
+    assert res_json.exit_code == 0
+    assert '"name": "Multi-Head Attention"' in res_json.output
+
+    # Name filter
+    res_filtered = runner.invoke(app, ["concepts", str(sample_file), "--name", "attention"])
+    assert res_filtered.exit_code == 0
+    assert "Multi-Head Attention" in res_filtered.output
+
+
+@patch("docpulse.cli.ICAGatewayClient")
+def test_cli_prerequisites_command(mock_client_cls, tmp_path):
+    
+    sample_file = tmp_path / "test.md"
+    sample_file.write_text("# Math Paper\nRequires linear algebra.", encoding="utf-8")
+
+    mock_client = MagicMock()
+    mock_client.chat_complete.return_value = LLMResponse(
+        content='{"prerequisites": [{"name": "Linear Algebra", "importance": "high", "difficulty": "medium", "needed_for": "Matrix calculus"}]}',
+        model="m",
+    )
+    mock_client_cls.return_value = mock_client
+
+    res = runner.invoke(app, ["prerequisites", str(sample_file)])
+    assert res.exit_code == 0
+    assert "Linear Algebra" in res.output
+    assert "Matrix calculus" in res.output
+
+
+@patch("docpulse.cli.ICAGatewayClient")
+def test_cli_equations_command(mock_client_cls, tmp_path):
+    
+    sample_file = tmp_path / "test.md"
+    sample_file.write_text("# Formula\nE = mc^2", encoding="utf-8")
+
+    mock_client = MagicMock()
+    mock_client.chat_complete.return_value = LLMResponse(
+        content='{"equations": [{"id": 1, "latex": "E = mc^2", "readable": "E = mc²", "section": "1", "variables": [{"symbol": "E", "description": "Energy"}], "explanation": "Mass-energy equivalence"}]}',
+        model="m",
+    )
+    mock_client_cls.return_value = mock_client
+
+    res = runner.invoke(app, ["equations", str(sample_file)])
+    assert res.exit_code == 0
+    assert "Equation 1" in res.output
+    assert "Mass-energy equivalence" in res.output
+
+
+@patch("docpulse.cli.ICAGatewayClient")
+def test_cli_map_command_text_json_mermaid(mock_client_cls, tmp_path):
+    
+    sample_file = tmp_path / "test.md"
+    sample_file.write_text("# Overview\nExplains architecture.", encoding="utf-8")
+
+    mock_client = MagicMock()
+    mock_client.chat_complete.side_effect = [
+        LLMResponse(content='{"concepts": [{"name": "Transformer", "importance": "high"}]}', model="m"),
+        LLMResponse(content='{"prerequisites": [{"name": "Calculus", "importance": "medium"}]}', model="m"),
+        LLMResponse(content='{"equations": []}', model="m"),
+    ]
+    mock_client_cls.return_value = mock_client
+
+    # Text mode
+    res_text = runner.invoke(app, ["map", str(sample_file)])
+    assert res_text.exit_code == 0
+    assert "DOCUMENT MAP" in res_text.output
+    assert "Transformer" in res_text.output
+
+    # JSON mode
+    mock_client.chat_complete.side_effect = [
+        LLMResponse(content='{"concepts": [{"name": "Transformer", "importance": "high"}]}', model="m"),
+        LLMResponse(content='{"prerequisites": [{"name": "Calculus", "importance": "medium"}]}', model="m"),
+        LLMResponse(content='{"equations": []}', model="m"),
+    ]
+    res_json = runner.invoke(app, ["map", str(sample_file), "--format", "json"])
+    assert res_json.exit_code == 0
+    assert '"core_concepts"' in res_json.output
+
+    # Mermaid mode
+    mock_client.chat_complete.side_effect = [
+        LLMResponse(content='{"concepts": [{"name": "Transformer", "importance": "high"}]}', model="m"),
+        LLMResponse(content='{"prerequisites": [{"name": "Calculus", "importance": "medium"}]}', model="m"),
+        LLMResponse(content='{"equations": []}', model="m"),
+    ]
+    res_mermaid = runner.invoke(app, ["map", str(sample_file), "--format", "mermaid"])
+    assert res_mermaid.exit_code == 0
+    assert "graph TD" in res_mermaid.output
+
+
+@patch("docpulse.cli.ICAGatewayClient")
+def test_cli_compare_command(mock_client_cls, tmp_path):
+    
+    f1 = tmp_path / "doc1.md"
+    f2 = tmp_path / "doc2.md"
+    f1.write_text("# Doc 1\nUses RNNs.", encoding="utf-8")
+    f2.write_text("# Doc 2\nUses Transformers.", encoding="utf-8")
+
+    mock_client = MagicMock()
+    mock_client.chat_complete.return_value = LLMResponse(
+        content='{"shared_concepts": ["Sequence Modeling"], "unique_to_a": ["Recurrence"], "unique_to_b": ["Self-Attention"], "key_differences": ["Parallelism vs Sequential"], "conclusion": "Doc 2 enables parallel training."}',
+        model="m",
+    )
+    mock_client_cls.return_value = mock_client
+
+    res = runner.invoke(app, ["compare", str(f1), str(f2)])
+    assert res.exit_code == 0
+    assert "DOCUMENT COMPARISON" in res.output
+    assert "Sequence Modeling" in res.output
+    assert "Self-Attention" in res.output
+
+
+@patch("docpulse.cli.ICAGatewayClient")
+def test_cli_study_command(mock_client_cls, tmp_path):
+    
+    sample_file = tmp_path / "test.md"
+    sample_file.write_text("# Doc\nLearning content.", encoding="utf-8")
+
+    mock_client = MagicMock()
+    mock_client.chat_complete.return_value = LLMResponse(
+        content='{"key_concepts": ["Attention"], "prerequisites": ["Vectors"], "important_equations": [], "flashcards": [{"question": "What is Q?", "answer": "Query"}], "questions": [{"question": "Why attention?", "type": "conceptual", "answer": "Better context"}]}',
+        model="m",
+    )
+    mock_client_cls.return_value = mock_client
+
+    res = runner.invoke(app, ["study", str(sample_file), "--questions", "3"])
+    assert res.exit_code == 0
+    assert "STUDY MODE" in res.output
+    assert "Flashcards" in res.output
+    assert "What is Q?" in res.output
+
+
+@patch("docpulse.cli.ICAGatewayClient")
+def test_cli_ask_with_citations(mock_client_cls, tmp_path):
+    
+    sample_file = tmp_path / "test.md"
+    sample_file.write_text("# Section 1\nDocPulse supports citations.", encoding="utf-8")
+
+    mock_client = MagicMock()
+    mock_client.chat_complete.return_value = LLMResponse(
+        content='{"answer": "It provides grounded citations.", "evidence": [{"section": "1", "section_title": "Section 1", "excerpt": "DocPulse supports citations"}]}',
+        model="m",
+    )
+    mock_client_cls.return_value = mock_client
+
+    res = runner.invoke(app, ["ask", str(sample_file), "Does it support citations?", "--citations"])
+    assert res.exit_code == 0
+    assert "It provides grounded citations." in res.output
+    assert "Evidence & Citations" in res.output
+    assert "Section: 1" in res.output

@@ -12,7 +12,7 @@ def test_config_save_and_load(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("DOCPULSE_CONFIG_PATH", str(custom_cfg_path))
 
     cfg = Config(
-        endpoint_url="https://test.ica.ibm.com/v1",
+        endpoint_url="https://gateway.example.com/v1",
         api_key="secret-key",
         namespace="assistants",
         model_id="ibm/granite-3-8b",
@@ -21,7 +21,7 @@ def test_config_save_and_load(tmp_path: Path, monkeypatch):
     save_config(cfg)
     loaded = load_config()
 
-    assert loaded.endpoint_url == "https://test.ica.ibm.com/v1"
+    assert loaded.endpoint_url == "https://gateway.example.com/v1"
     assert loaded.api_key == "secret-key"
     assert loaded.namespace == "assistants"
     assert loaded.model_id == "ibm/granite-3-8b"
@@ -60,6 +60,6 @@ Section extraction and token parsing.
 def test_parser_factory(tmp_path: Path):
     sample_md = tmp_path / "doc.md"
     sample_md.write_text("# Test", encoding="utf-8")
-    
+
     doc = parse_document(sample_md)
     assert doc.doc_type == "markdown"

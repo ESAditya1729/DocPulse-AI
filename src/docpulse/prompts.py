@@ -1,5 +1,9 @@
 """Prompts used across DocPulse commands."""
 
+JSON_SYSTEM_PROMPT = """You are DocPulse, a document intelligence engine.
+Output valid JSON only. Do not include markdown code fences, reasoning preambles, or conversational filler.
+Start directly with `{` and end with `}`."""
+
 SYSTEM_PROMPT = """You are DocPulse, a document intelligence engine.
 Output ONLY the requested Markdown document directly.
 Do NOT include conversational filler, meta-announcements, reasoning preambles (e.g. "Sure!", "Here is the study guide...", "Let me structure this..."), or closing pleasantries.
@@ -117,4 +121,143 @@ You MUST follow this exact structure without any conversational chatter or intro
 
 ## Self-Assessment Quiz
 (Questions followed by an Answers & Explanations section)
+"""
+
+CONCEPTS_PROMPT = """Extract the key concepts from the entire document content.
+Output a JSON object with this exact structure:
+{{
+  "concepts": [
+    {{
+      "name": "Concept Name",
+      "description": "Clear and concise explanation of the concept based on the document",
+      "importance": "high | medium | low",
+      "sections": ["Section 1 or ID", "Section 2"],
+      "related_concepts": ["Other Concept 1", "Other Concept 2"],
+      "prerequisites": ["Prerequisite Concept 1"]
+    }}
+  ]
+}}
+
+Document Content:
+\"\"\"{content}\"\"\"
+"""
+
+PREREQUISITES_PROMPT = """Analyze the prerequisite knowledge and background needed to understand the document.
+Output a JSON object with this exact structure:
+{{
+  "prerequisites": [
+    {{
+      "name": "Prerequisite Topic / Subject",
+      "importance": "high | medium | low",
+      "difficulty": "beginner | medium | advanced",
+      "needed_for": "Why this is needed and what it enables in this document",
+      "relevant_sections": ["Section 1", "Section 2"],
+      "dependencies": ["Underlying foundational topic (e.g. Linear Algebra for Matrix Ops)"]
+    }}
+  ]
+}}
+
+Document Content:
+\"\"\"{content}\"\"\"
+"""
+
+EQUATIONS_PROMPT = """Identify and explain all mathematical equations, formulations, and algorithms in the document.
+Output a JSON object with this exact structure:
+{{
+  "equations": [
+    {{
+      "id": 1,
+      "latex": "LaTeX or raw representation of equation",
+      "readable": "Unicode/human-friendly representation",
+      "section": "Section number or title where it appears",
+      "variables": [
+        {{"symbol": "x", "description": "variable description"}}
+      ],
+      "concepts": ["Concept 1", "Concept 2"],
+      "explanation": "Clear explanation of what the equation computes and its significance",
+      "usage": "Where and how this equation is used in the methodology or architecture"
+    }}
+  ]
+}}
+
+If no equations exist in the document, return {{"equations": []}}.
+
+Document Content:
+\"\"\"{content}\"\"\"
+"""
+
+COMPARE_PROMPT = """Compare the following two documents conceptually and structurally.
+Document A ({doc_a_name}):
+\"\"\"{doc_a_content}\"\"\"
+
+Document B ({doc_b_name}):
+\"\"\"{doc_b_content}\"\"\"
+
+Output a JSON object with this exact structure:
+{{
+  "shared_concepts": ["Concept present in both"],
+  "unique_to_a": ["Concept or method unique to Document A"],
+  "unique_to_b": ["Concept or method unique to Document B"],
+  "methodology_a": "Summary of Document A's methodology and technical approach",
+  "methodology_b": "Summary of Document B's methodology and technical approach",
+  "prerequisites_comparison": "Comparison of background and prerequisite knowledge needed",
+  "equations_comparison": "Comparison of mathematical foundations and formulations",
+  "key_differences": [
+    "Key difference 1",
+    "Key difference 2"
+  ],
+  "conclusion": "Synthesized conclusion comparing their contributions, strengths, and use cases"
+}}
+"""
+
+STUDY_PROMPT = """Generate an interactive learning and study package based on the document content.
+Create {num_questions} questions across multiple-choice, conceptual, and short-answer types, along with flashcards.
+
+Output a JSON object with this exact structure:
+{{
+  "key_concepts": ["Concept 1", "Concept 2"],
+  "prerequisites": ["Prerequisite 1", "Prerequisite 2"],
+  "important_equations": ["Equation 1 or formula"],
+  "flashcards": [
+    {{
+      "question": "Concise prompt/question for active recall?",
+      "answer": "Direct, precise answer"
+    }}
+  ],
+  "questions": [
+    {{
+      "question": "Question text?",
+      "type": "multiple_choice | conceptual | short_answer",
+      "options": ["Option A", "Option B", "Option C", "Option D"],
+      "answer": "Correct answer or answer key",
+      "explanation": "Detailed explanation of why this is correct"
+    }}
+  ]
+}}
+
+Document Content:
+\"\"\"{content}\"\"\"
+"""
+
+ASK_CITATIONS_PROMPT = """Answer the user's question based on the document below.
+Provide a clear answer along with citations indicating the section, page (if available), and relevant excerpt where the evidence is found.
+
+Output a JSON object with this exact structure:
+{{
+  "answer": "Comprehensive and accurate answer to the question",
+  "evidence": [
+    {{
+      "section": "Section number or identifier",
+      "section_title": "Section title",
+      "page": null,
+      "excerpt": "Brief excerpt or summary of evidence from that section"
+    }}
+  ]
+}}
+
+Document: {doc_name}
+Document Content:
+\"\"\"{content}\"\"\"
+
+Question: {question}
 """
