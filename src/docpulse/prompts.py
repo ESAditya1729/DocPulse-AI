@@ -255,6 +255,14 @@ Document Content:
 ASK_CITATIONS_PROMPT = """Answer the user's question based on the document below.
 Provide a clear answer along with citations indicating the section, page (if available), and relevant excerpt where the evidence is found.
 
+A local BM25 retriever has ranked the document passages most relevant to this question. They are listed
+below as candidate evidence - prefer them when choosing what to cite:
+{passages}
+
+For each citation, make the excerpt a near-verbatim quote from the source text so it can be verified
+against the document. Only cite sections that actually contain the evidence; say clearly when the
+document does not answer the question.
+
 Output a JSON object with this exact structure:
 {{
   "answer": "Comprehensive and accurate answer to the question",

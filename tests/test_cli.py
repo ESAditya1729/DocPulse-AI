@@ -315,7 +315,7 @@ def test_cli_compare_command(mock_client_cls, tmp_path):
 
     res = runner.invoke(app, ["compare", str(f1), str(f2)])
     assert res.exit_code == 0
-    assert "DOCUMENT COMPARISON" in res.output
+    assert "Document Comparison" in res.output
     assert "Sequence Modeling" in res.output
     assert "Self-Attention" in res.output
 
@@ -335,7 +335,7 @@ def test_cli_study_command(mock_client_cls, tmp_path):
 
     res = runner.invoke(app, ["study", str(sample_file), "--questions", "3"])
     assert res.exit_code == 0
-    assert "STUDY MODE" in res.output
+    assert "Study Mode" in res.output
     assert "Flashcards" in res.output
     assert "What is Q?" in res.output
 
@@ -358,3 +358,199 @@ def test_cli_ask_with_citations(mock_client_cls, tmp_path):
     assert "It provides grounded citations." in res.output
     assert "Evidence & Citations" in res.output
     assert "Section: 1" in res.output
+    assert "✓ verified" in res.output
+
+
+@patch("docpulse.cli.ICAGatewayClient")
+def test_cli_ask_citations_json_reports_verification_and_retrieval(mock_client_cls, tmp_path):
+    sample_file = tmp_path / "test.md"
+    sample_file.write_text(
+        "# Section 1\nDocPulse supports citations.\n\n# Other\nUnrelated content here.",
+        encoding="utf-8",
+    )
+
+    mock_client = MagicMock()
+    mock_client.chat_complete.return_value = LLMResponse(
+        content='{"answer": "Yes.", "evidence": ['
+        '{"section": "1", "section_title": "Section 1", "excerpt": "DocPulse supports citations"}, '
+        '{"section": "42", "excerpt": "a claim that appears nowhere in this document"}]}',
+        model="m",
+    )
+    mock_client_cls.return_value = mock_client
+
+    res = runner.invoke(app, ["ask", str(sample_file), "Does it support citations?", "--citations", "--format", "json"])
+    assert res.exit_code == 0
+    assert '"verified": true' in res.output
+    assert '"verified": false' in res.output
+    assert '"score":' in res.output
+
+    # The prompt must carry the BM25 candidate passages.
+    sent_prompt = mock_client.chat_complete.call_args.kwargs["messages"][0]["content"]
+    assert "BM25" in sent_prompt
+    assert "relevance" in sent_prompt
+
+
+@patch("docpulse.cli.ICAGatewayClient")
+def test_cli_anki_export_file_and_stdout(mock_client_cls, tmp_path):
+    sample_file = tmp_path / "test.md"
+    sample_file.write_text("# Doc\nLearning content.", encoding="utf-8")
+
+    mock_client = MagicMock()
+    mock_client.chat_complete.return_value = LLMResponse(
+        content='{"key_concepts": [], "prerequisites": [], "important_equations": [], '
+        '"flashcards": [{"question": "What is Q?", "answer": "Query"}], '
+        '"questions": [{"question": "Why attention?", "type": "conceptual", '
+        '"options": ["A", "B"], "answer": "Better context", "explanation": "Long-range links."}]}',
+        model="m",
+    )
+    mock_client_cls.return_value = mock_client
+
+    out_file = tmp_path / "deck.tsv"
+    res = runner.invoke(app, ["anki", str(sample_file), "--output", str(out_file)])
+    assert res.exit_code == 0
+    assert "Anki deck exported" in res.output
+
+    lines = out_file.read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "What is Q?\tQuery"
+    assert lines[1] == "Why attention?<br>A<br>B\tBetter context<br>Long-range links."
+
+    # stdout mode: the deck itself, pipe-safe, no confirmation banner.
+    res_stdout = runner.invoke(app, ["anki", str(sample_file), "--no-questions"])
+    assert res_stdout.exit_code == 0
+    assert res_stdout.output.strip() == "What is Q?\tQuery"
+
+    # CSV mode
+    out_csv = tmp_path / "deck.csv"
+    res_csv = runner.invoke(app, ["anki", str(sample_file), "--format", "csv", "--output", str(out_csv)])
+    assert res_csv.exit_code == 0
+    csv_text = out_csv.read_text(encoding="utf-8")
+    assert "Why attention?" in csv_text
+    assert "Better context" in csv_text
+
+
+@patch("docpulse.cli.ICAGatewayClient")
+def test_cli_anki_rejects_unknown_format(mock_client_cls, tmp_path):
+    sample_file = tmp_path / "test.md"
+    sample_file.write_text("# Doc\nContent.", encoding="utf-8")
+
+    res = runner.invoke(app, ["anki", str(sample_file), "--format", "xml"])
+    assert res.exit_code == 2
+    assert "Unsupported deck format" in res.output
+
+
+@patch("docpulse.cli.ICAGatewayClient")
+def test_cli_drill_session_scores_hits_and_misses(mock_client_cls, tmp_path):
+    sample_file = tmp_path / "test.md"
+    sample_file.write_text("# Doc\nLearning content.", encoding="utf-8")
+
+    mock_client = MagicMock()
+    mock_client.chat_complete.return_value = LLMResponse(
+        content='{"key_concepts": [], "prerequisites": [], "important_equations": [], '
+        '"flashcards": [{"question": "Card one?", "answer": "Answer one"}, '
+        '{"question": "Card two?", "answer": "Answer two"}], "questions": []}',
+        model="m",
+    )
+    mock_client_cls.return_value = mock_client
+
+    # Card 1: reveal, grade hit. Card 2: reveal, grade miss.
+    res = runner.invoke(app, ["drill", str(sample_file)], input="\nh\n\nm\n")
+    assert res.exit_code == 0
+    assert "Drill Summary" in res.output
+    assert "Hits:" in res.output and "1" in res.output
+    assert "Misses:" in res.output and "1" in res.output
+    assert "50%" in res.output
+
+
+@patch("docpulse.cli.ICAGatewayClient")
+def test_cli_drill_skip_and_quit(mock_client_cls, tmp_path):
+    sample_file = tmp_path / "test.md"
+    sample_file.write_text("# Doc\nLearning content.", encoding="utf-8")
+
+    mock_client = MagicMock()
+    mock_client.chat_complete.return_value = LLMResponse(
+        content='{"key_concepts": [], "prerequisites": [], "important_equations": [], '
+        '"flashcards": [{"question": "Card one?", "answer": "A1"}, '
+        '{"question": "Card two?", "answer": "A2"}], "questions": []}',
+        model="m",
+    )
+    mock_client_cls.return_value = mock_client
+
+    res = runner.invoke(app, ["drill", str(sample_file)], input="s\nq\n")
+    assert res.exit_code == 0
+    assert "Skipped:" in res.output
+    assert "Drill Summary" in res.output
+
+
+def test_cli_cache_status_and_clear(tmp_path):
+    from docpulse.cache import get_cache_dir
+
+    cache_dir = get_cache_dir()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    (cache_dir / "a.json").write_text('{"content": "x"}', encoding="utf-8")
+    (cache_dir / "b.json").write_text('{"content": "y"}', encoding="utf-8")
+
+    res = runner.invoke(app, ["cache"])
+    assert res.exit_code == 0
+    assert "Entries: 2" in res.output
+
+    res_json = runner.invoke(app, ["cache", "--format", "json"])
+    assert res_json.exit_code == 0
+    assert '"entries": 2' in res_json.output
+
+    res_clear = runner.invoke(app, ["cache", "--clear"])
+    assert res_clear.exit_code == 0
+    assert "Cleared 2 entries" in res_clear.output
+    assert list(cache_dir.glob("*.json")) == []
+
+    res_empty = runner.invoke(app, ["cache"])
+    assert "Entries: 0" in res_empty.output
+
+
+@patch("docpulse.cli.ICAGatewayClient")
+def test_cli_doctor_all_checks_pass(mock_client_cls, tmp_path):
+    mock_client = MagicMock()
+    mock_client.check_health.return_value = {
+        "status": "ok",
+        "endpoint": "https://gateway.example.com/v1/chat-models/models",
+        "code": 200,
+        "models_count": 3,
+    }
+    mock_client_cls.return_value = mock_client
+
+    res = runner.invoke(app, ["doctor"])
+    assert res.exit_code == 0
+    assert "DocPulse Doctor" in res.output
+    assert "All checks passed" in res.output
+
+    res_json = runner.invoke(app, ["doctor", "--format", "json"])
+    assert res_json.exit_code == 0
+    assert '"status": "ok"' in res_json.output
+    assert '"name": "gateway"' in res_json.output
+
+
+@patch("docpulse.cli.ICAGatewayClient")
+def test_cli_doctor_no_network_skips_gateway(mock_client_cls, tmp_path):
+    res = runner.invoke(app, ["doctor", "--no-network"])
+    assert res.exit_code == 0
+    assert "skipped (--no-network)" in res.output
+    mock_client_cls.return_value.check_health.assert_not_called()
+
+
+@patch("docpulse.cli.ICAGatewayClient")
+def test_cli_doctor_gateway_failure_exits_3(mock_client_cls, tmp_path):
+    mock_client = MagicMock()
+    mock_client.check_health.return_value = {"status": "error", "message": "boom", "code": None}
+    mock_client_cls.return_value = mock_client
+
+    res = runner.invoke(app, ["doctor"])
+    assert res.exit_code == 3
+    assert "boom" in res.output
+
+
+def test_cli_doctor_invalid_config_exits_2(tmp_path, monkeypatch):
+    monkeypatch.setenv("DOCPULSE_CONFIG_PATH", str(tmp_path / "does_not_exist.json"))
+
+    res = runner.invoke(app, ["doctor", "--no-network"])
+    assert res.exit_code == 2
+    assert "✗ fail" in res.output
+    assert "not configured" in res.output

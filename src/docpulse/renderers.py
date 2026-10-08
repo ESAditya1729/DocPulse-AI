@@ -1,5 +1,7 @@
 """Renderers and formatters for human-readable, JSON, and Mermaid outputs."""
 
+import csv
+import io
 import json
 import re
 import sys
@@ -23,6 +25,9 @@ from docpulse.models import (
 )
 
 console = Console()
+# Warnings for commands that write their payload to stdout (e.g. `anki` piping
+# into a file or another tool) go here so stdout stays machine-readable.
+err_console = Console(stderr=True)
 
 
 def render_markdown_with_equations(markdown_text: str) -> Markdown | Group:
@@ -101,31 +106,64 @@ def print_json(data: Any) -> None:
 
 
 def render_concepts_text(result: ConceptIndexResult) -> None:
-    """Render structured concept index nicely in Rich terminal."""
+    """Render structured concept index as numbered panels with importance badges."""
     if not result.concepts:
         console.print("[yellow]No concepts identified in the document.[/yellow]")
         return
 
-    console.print(f"[bold cyan]Concepts ({len(result.concepts)} identified)[/bold cyan]")
-    console.print("[dim]" + "─" * 40 + "[/dim]")
+    total = len(result.concepts)
+    console.print(
+        Panel(
+            f"[bold white]{result.document}[/bold white]\n"
+            f"[dim]{total} concept{'s' if total != 1 else ''} identified[/dim]",
+            title="[bold cyan]Concept Index[/bold cyan]",
+            border_style="cyan",
+            expand=False,
+            padding=(0, 2),
+        )
+    )
+    console.print()
 
-    for idx, c in enumerate(result.concepts, start=1):
-        importance_color = {
-            "high": "bold red",
-            "medium": "bold yellow",
-            "low": "dim green",
-        }.get(c.importance.lower(), "cyan")
+    _IMP_BORDER = {"high": "red", "medium": "yellow", "low": "green"}
+    _IMP_BADGE  = {
+        "high":   "[bold red]● High[/bold red]",
+        "medium": "[bold yellow]◑ Medium[/bold yellow]",
+        "low":    "[dim green]○ Low[/dim green]",
+    }
 
-        sections_str = ", ".join(str(s) for s in c.sections) if c.sections else "General"
-        console.print(f"\n[bold]{idx}. {c.name}[/bold]")
-        console.print(f"   [dim]Sections:[/dim] {sections_str}")
-        console.print(f"   [dim]Importance:[/dim] [{importance_color}]{c.importance.capitalize()}[/{importance_color}]")
+    # Sort: high importance first, then medium, then low
+    _imp_order = {"high": 0, "medium": 1, "low": 2}
+    ordered = sorted(result.concepts, key=lambda c: _imp_order.get(c.importance.lower(), 1))
+
+    for idx, c in enumerate(ordered, start=1):
+        imp_key   = c.importance.lower()
+        border    = _IMP_BORDER.get(imp_key, "cyan")
+        imp_badge = _IMP_BADGE.get(imp_key, f"[cyan]{c.importance.capitalize()}[/cyan]")
+        sections_str = "  ".join(f"[bold cyan]§{s}[/bold cyan]" for s in c.sections) if c.sections else "[dim]General[/dim]"
+
+        lines: list[str] = []
+        lines.append(f"[dim]Importance:[/dim]  {imp_badge}    [dim]Sections:[/dim]  {sections_str}")
+
         if c.description:
-            console.print(f"   [dim]Description:[/dim] {c.description}")
+            lines.append(f"\n{c.description}")
+
         if c.related_concepts:
-            console.print(f"   [dim]Related:[/dim] {', '.join(c.related_concepts)}")
+            related_str = "  ".join(f"[italic]{r}[/italic]" for r in c.related_concepts)
+            lines.append(f"[dim]Related:[/dim]     {related_str}")
+
         if c.prerequisites:
-            console.print(f"   [dim]Prerequisites:[/dim] {', '.join(c.prerequisites)}")
+            prereqs_str = "  ".join(f"[italic]{p}[/italic]" for p in c.prerequisites)
+            lines.append(f"[dim]Requires:[/dim]    {prereqs_str}")
+
+        console.print(
+            Panel(
+                "\n".join(lines),
+                title=f"[bold]{idx}. {c.name}[/bold]",
+                border_style=border,
+                expand=False,
+                padding=(0, 2),
+            )
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -134,38 +172,68 @@ def render_concepts_text(result: ConceptIndexResult) -> None:
 
 
 def render_prerequisites_text(result: PrerequisiteResult) -> None:
-    """Render prerequisite analysis with dependency tree."""
+    """Render prerequisite analysis as numbered panels with badges."""
     if not result.prerequisites:
         console.print("[yellow]No prerequisites identified in the document.[/yellow]")
         return
 
-    console.print(f"[bold cyan]Prerequisites ({len(result.prerequisites)} required)[/bold cyan]")
-    console.print("[dim]" + "─" * 40 + "[/dim]")
+    total = len(result.prerequisites)
+    console.print(
+        Panel(
+            f"[bold white]{result.document}[/bold white]\n"
+            f"[dim]{total} prerequisite{'s' if total != 1 else ''} identified[/dim]",
+            title="[bold cyan]Prerequisites[/bold cyan]",
+            border_style="cyan",
+            expand=False,
+            padding=(0, 2),
+        )
+    )
+    console.print()
 
-    for p in result.prerequisites:
-        importance_color = {
-            "high": "bold red",
-            "medium": "bold yellow",
-            "low": "dim green",
-        }.get(p.importance.lower(), "cyan")
+    _IMP_BORDER = {"high": "red", "medium": "yellow", "low": "green"}
+    _IMP_BADGE  = {"high": "[bold red]● High[/bold red]", "medium": "[bold yellow]◑ Medium[/bold yellow]", "low": "[dim green]○ Low[/dim green]"}
+    _DIFF_BADGE = {
+        "beginner":  "[bold green]▲ Beginner[/bold green]",
+        "low":       "[bold green]▲ Low[/bold green]",
+        "medium":    "[bold yellow]▲▲ Medium[/bold yellow]",
+        "high":      "[bold red]▲▲▲ High[/bold red]",
+        "advanced":  "[bold red]▲▲▲ Advanced[/bold red]",
+    }
 
-        diff_color = {
-            "advanced": "red",
-            "high": "red",
-            "medium": "yellow",
-            "beginner": "green",
-            "low": "green",
-        }.get(p.difficulty.lower(), "white")
+    # Sort: high importance first, then medium, then low
+    _imp_order = {"high": 0, "medium": 1, "low": 2}
+    ordered = sorted(result.prerequisites, key=lambda p: _imp_order.get(p.importance.lower(), 1))
 
-        console.print(f"\n[bold]{p.name}[/bold]")
-        console.print(f"  [dim]Importance:[/dim] [{importance_color}]{p.importance.capitalize()}[/{importance_color}]")
-        console.print(f"  [dim]Difficulty:[/dim] [{diff_color}]{p.difficulty.capitalize()}[/{diff_color}]")
+    for idx, p in enumerate(ordered, start=1):
+        imp_key   = p.importance.lower()
+        diff_key  = p.difficulty.lower()
+        border    = _IMP_BORDER.get(imp_key, "cyan")
+        imp_badge = _IMP_BADGE.get(imp_key, f"[cyan]{p.importance.capitalize()}[/cyan]")
+        diff_badge = _DIFF_BADGE.get(diff_key, f"[white]{p.difficulty.capitalize()}[/white]")
+
+        lines: list[str] = []
+        lines.append(f"[dim]Importance:[/dim]  {imp_badge}    [dim]Difficulty:[/dim]  {diff_badge}")
+
         if p.needed_for:
-            console.print(f"  [dim]Needed for:[/dim] {p.needed_for}")
+            lines.append(f"\n[dim]Needed for:[/dim]  {p.needed_for}")
+
         if p.relevant_sections:
-            console.print(f"  [dim]Relevant in:[/dim] {', '.join(str(s) for s in p.relevant_sections)}")
+            sections_str = "  ".join(f"[bold cyan]§{s}[/bold cyan]" for s in p.relevant_sections)
+            lines.append(f"[dim]Sections:[/dim]    {sections_str}")
+
         if p.dependencies:
-            console.print(f"  [dim]Dependencies:[/dim] {', '.join(p.dependencies)}")
+            deps_str = "  ".join(f"[italic]{d}[/italic]" for d in p.dependencies)
+            lines.append(f"[dim]Depends on:[/dim]  {deps_str}")
+
+        console.print(
+            Panel(
+                "\n".join(lines),
+                title=f"[bold]{idx}. {p.name}[/bold]",
+                border_style=border,
+                expand=False,
+                padding=(0, 2),
+            )
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -375,57 +443,77 @@ def generate_document_map_mermaid(result: DocumentMapResult) -> str:
 
 
 def render_comparison_text(result: DocumentComparisonResult) -> None:
-    """Render comparison between two documents."""
-    console.print("[bold cyan]DOCUMENT COMPARISON[/bold cyan]")
-    console.print(f"[dim]Document A:[/dim] [bold]{result.document_a}[/bold]")
-    console.print(f"[dim]Document B:[/dim] [bold]{result.document_b}[/bold]")
-    console.print("[dim]" + "═" * 45 + "[/dim]\n")
+    """Render comparison between two documents with structured panels."""
+    from rich.table import Table
 
-    if result.shared_concepts:
-        console.print("[bold green]Shared Concepts[/bold green]")
-        for sc in result.shared_concepts:
-            console.print(f"  • {sc}")
+    # Header
+    console.print(
+        Panel(
+            f"[bold cyan]{result.document_a}[/bold cyan]  [dim]vs[/dim]  [bold magenta]{result.document_b}[/bold magenta]",
+            title="[bold white]Document Comparison[/bold white]",
+            border_style="white",
+            expand=False,
+            padding=(0, 2),
+        )
+    )
+    console.print()
+
+    # Shared / Unique side-by-side table
+    if result.shared_concepts or result.unique_to_a or result.unique_to_b:
+        tbl = Table(show_header=True, header_style="bold", expand=False, box=None, padding=(0, 2))
+        tbl.add_column("[bold green]Shared Concepts[/bold green]", style="green")
+        tbl.add_column(f"[bold cyan]Only in {result.document_a}[/bold cyan]", style="cyan")
+        tbl.add_column(f"[bold magenta]Only in {result.document_b}[/bold magenta]", style="magenta")
+        rows = max(len(result.shared_concepts), len(result.unique_to_a), len(result.unique_to_b))
+        for i in range(rows):
+            tbl.add_row(
+                result.shared_concepts[i] if i < len(result.shared_concepts) else "",
+                result.unique_to_a[i]      if i < len(result.unique_to_a)      else "",
+                result.unique_to_b[i]      if i < len(result.unique_to_b)      else "",
+            )
+        console.print(Panel(tbl, title="[bold]Concepts[/bold]", border_style="dim", expand=False, padding=(0, 1)))
         console.print()
 
-    if result.unique_to_a:
-        console.print(f"[bold cyan]Unique to {result.document_a}[/bold cyan]")
-        for u in result.unique_to_a:
-            console.print(f"  • {u}")
-        console.print()
-
-    if result.unique_to_b:
-        console.print(f"[bold magenta]Unique to {result.document_b}[/bold magenta]")
-        for u in result.unique_to_b:
-            console.print(f"  • {u}")
-        console.print()
-
+    # Methodology panel
     if result.methodology_a or result.methodology_b:
-        console.print("[bold yellow]Methodology[/bold yellow]")
+        meth_lines = []
         if result.methodology_a:
-            console.print(f"  [cyan]{result.document_a}:[/cyan] {result.methodology_a}")
+            meth_lines.append(f"[bold cyan]{result.document_a}:[/bold cyan]  {result.methodology_a}")
         if result.methodology_b:
-            console.print(f"  [magenta]{result.document_b}:[/magenta] {result.methodology_b}")
+            meth_lines.append(f"[bold magenta]{result.document_b}:[/bold magenta]  {result.methodology_b}")
+        console.print(
+            Panel("\n".join(meth_lines), title="[bold yellow]Methodology[/bold yellow]", border_style="yellow", expand=False, padding=(0, 2))
+        )
         console.print()
 
+    # Prerequisites comparison panel
     if result.prerequisites_comparison:
-        console.print("[bold yellow]Prerequisites Comparison[/bold yellow]")
-        console.print(f"  {result.prerequisites_comparison}\n")
-
-    if result.equations_comparison:
-        console.print("[bold yellow]Mathematical Formulations Comparison[/bold yellow]")
-        console.print(f"  {result.equations_comparison}\n")
-
-    if result.key_differences:
-        console.print("[bold red]Key Differences[/bold red]")
-        for diff in result.key_differences:
-            console.print(f"  • {diff}")
+        console.print(
+            Panel(result.prerequisites_comparison, title="[bold yellow]Prerequisites[/bold yellow]", border_style="yellow", expand=False, padding=(0, 2))
+        )
         console.print()
 
+    # Equations comparison panel
+    if result.equations_comparison:
+        console.print(
+            Panel(result.equations_comparison, title="[bold magenta]Mathematical Formulations[/bold magenta]", border_style="magenta", expand=False, padding=(0, 2))
+        )
+        console.print()
+
+    # Key differences panel
+    if result.key_differences:
+        diff_lines = "\n".join(f"[red]•[/red] {d}" for d in result.key_differences)
+        console.print(
+            Panel(diff_lines, title="[bold red]Key Differences[/bold red]", border_style="red", expand=False, padding=(0, 2))
+        )
+        console.print()
+
+    # Conclusion panel
     if result.conclusion:
         console.print(
             Panel(
                 Markdown(result.conclusion),
-                title="Comparative Conclusion",
+                title="[bold green]Comparative Conclusion[/bold green]",
                 border_style="green",
                 expand=False,
             )
@@ -438,28 +526,52 @@ def render_comparison_text(result: DocumentComparisonResult) -> None:
 
 
 def render_study_mode_text(result: StudyModeResult) -> None:
-    """Render study mode questions, concepts, and flashcards."""
-    console.print(f"[bold cyan]STUDY MODE: {result.document}[/bold cyan]")
-    console.print("[dim]" + "═" * 45 + "[/dim]\n")
-
+    """Render study mode questions, concepts, and flashcards with structured panels."""
+    # Header
+    counts = []
     if result.key_concepts:
-        console.print("[bold green]Key Concepts[/bold green]")
-        for idx, kc in enumerate(result.key_concepts, 1):
-            console.print(f"  {idx}. {kc}")
+        counts.append(f"{len(result.key_concepts)} concepts")
+    if result.flashcards:
+        counts.append(f"{len(result.flashcards)} flashcards")
+    if result.questions:
+        counts.append(f"{len(result.questions)} questions")
+    summary = "  •  ".join(counts) if counts else "study package"
+    console.print(
+        Panel(
+            f"[bold white]{result.document}[/bold white]\n[dim]{summary}[/dim]",
+            title="[bold cyan]Study Mode[/bold cyan]",
+            border_style="cyan",
+            expand=False,
+            padding=(0, 2),
+        )
+    )
+    console.print()
+
+    # Key concepts panel
+    if result.key_concepts:
+        lines = "\n".join(f"[bold cyan]{i}.[/bold cyan] {kc}" for i, kc in enumerate(result.key_concepts, 1))
+        console.print(
+            Panel(lines, title="[bold green]Key Concepts[/bold green]", border_style="green", expand=False, padding=(0, 2))
+        )
         console.print()
 
+    # Prerequisites panel
     if result.prerequisites:
-        console.print("[bold yellow]Prerequisites to Review[/bold yellow]")
-        for _idx, pr in enumerate(result.prerequisites, 1):
-            console.print(f"  • {pr}")
+        lines = "\n".join(f"[yellow]•[/yellow] {pr}" for pr in result.prerequisites)
+        console.print(
+            Panel(lines, title="[bold yellow]Prerequisites to Review[/bold yellow]", border_style="yellow", expand=False, padding=(0, 2))
+        )
         console.print()
 
+    # Important equations panel
     if result.important_equations:
-        console.print("[bold magenta]Important Equations & Formulas[/bold magenta]")
-        for eq in result.important_equations:
-            console.print(f"  • {eq}")
+        lines = "\n".join(f"[magenta]•[/magenta] {eq}" for eq in result.important_equations)
+        console.print(
+            Panel(lines, title="[bold magenta]Important Equations & Formulas[/bold magenta]", border_style="magenta", expand=False, padding=(0, 2))
+        )
         console.print()
 
+    # Flashcards — already use panels; add count to title
     if result.flashcards:
         console.print("[bold cyan]Flashcards[/bold cyan]")
         console.print("[dim]" + "─" * 20 + "[/dim]")
@@ -467,25 +579,35 @@ def render_study_mode_text(result: StudyModeResult) -> None:
             console.print(
                 Panel(
                     f"[bold yellow]Q:[/bold yellow] {fc.question}\n\n[bold green]A:[/bold green] {fc.answer}",
-                    title=f"Card {idx}",
+                    title=f"[bold]Card {idx} / {len(result.flashcards)}[/bold]",
                     border_style="cyan",
                     expand=False,
                 )
             )
+        console.print()
 
+    # Questions — each in its own panel
     if result.questions:
-        console.print("\n[bold cyan]Questions & Self-Assessment[/bold cyan]")
+        console.print("[bold cyan]Questions & Self-Assessment[/bold cyan]")
         console.print("[dim]" + "─" * 20 + "[/dim]")
         for idx, q in enumerate(result.questions, 1):
-            type_tag = f" [dim]({q.type})[/dim]" if q.type else ""
-            console.print(f"\n[bold]{idx}. {q.question}[/bold]{type_tag}")
+            type_tag = f"[dim] ({q.type})[/dim]" if q.type else ""
+            lines = [f"[bold]{q.question}[/bold]{type_tag}"]
             if q.options:
-                for opt in q.options:
-                    console.print(f"   {opt}")
+                lines += [f"  {opt}" for opt in q.options]
             if q.answer:
-                console.print(f"   [dim green]Answer:[/dim green] {q.answer}")
+                lines.append(f"[dim green]Answer:[/dim green] {q.answer}")
             if q.explanation:
-                console.print(f"   [dim]Explanation:[/dim] {q.explanation}")
+                lines.append(f"[dim]Explanation:[/dim] {q.explanation}")
+            console.print(
+                Panel(
+                    "\n".join(lines),
+                    title=f"[bold]Q{idx}[/bold]",
+                    border_style="blue",
+                    expand=False,
+                    padding=(0, 2),
+                )
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -517,6 +639,59 @@ def render_answer_with_citations_text(result: AnswerWithEvidence) -> None:
                 locs.append(f"Page: {ev.page}")
 
             loc_str = " | ".join(locs) if locs else "Document Location"
-            console.print(f"• [bold]{loc_str}[/bold]")
+            if ev.verified is True:
+                badge = " [green]✓ verified[/green]"
+            elif ev.verified is False:
+                badge = " [yellow]⚠ not verified[/yellow]"
+            else:
+                badge = ""
+            score_str = f" [dim](relevance {ev.score:.2f})[/dim]" if ev.score is not None else ""
+            console.print(f"• [bold]{loc_str}[/bold]{badge}{score_str}")
             if ev.excerpt:
                 console.print(f"  [dim]\"{ev.excerpt}\"[/dim]")
+
+
+# ---------------------------------------------------------------------------
+# Anki Deck Export
+# ---------------------------------------------------------------------------
+
+
+def build_anki_rows(result: StudyModeResult, *, include_questions: bool = True) -> list[tuple[str, str]]:
+    """Turn a study package into (front, back) rows for Anki import.
+
+    Shared by `anki` (file export) and `drill` (interactive session) so both
+    drill the same material in the same order.
+    """
+    rows = [(fc.question.strip(), fc.answer.strip()) for fc in result.flashcards if fc.question.strip()]
+    if include_questions:
+        for q in result.questions:
+            if not q.question.strip():
+                continue
+            front = q.question.strip()
+            if q.options:
+                front += "\n" + "\n".join(q.options)
+            back = q.answer.strip()
+            if q.explanation.strip():
+                back = f"{back}\n{q.explanation.strip()}".strip()
+            rows.append((front, back))
+    return rows
+
+
+def format_anki_deck(rows: list[tuple[str, str]], fmt: str) -> str:
+    """Serialize rows as an Anki-importable deck.
+
+    TSV is Anki's default separator for plain-text imports; newlines inside a
+    field become `<br>` (Anki renders HTML) because a literal newline would
+    start a new note. CSV keeps real newlines inside standard quotes.
+    """
+    if fmt == "csv":
+        buffer = io.StringIO()
+        writer = csv.writer(buffer, lineterminator="\n")
+        writer.writerows(rows)
+        return buffer.getvalue()
+
+    def cell(text: str) -> str:
+        flattened = "<br>".join(line.strip() for line in text.replace("\t", " ").splitlines())
+        return flattened.strip()
+
+    return "".join(f"{cell(front)}\t{cell(back)}\n" for front, back in rows)

@@ -1,5 +1,6 @@
 """Command-Line Interface for DocPulse."""
 
+import platform
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ import typer
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
+from rich.text import Text
 
 from docpulse import __version__
 from docpulse.analyzers import (
@@ -22,9 +24,19 @@ from docpulse.analyzers import (
     parse_sources_response,
     parse_study_response,
 )
-from docpulse.cache import LLMOutcome, get_cached_or_generate
-from docpulse.config import Config, load_config, save_config
-from docpulse.errors import EXIT_INTERNAL, DocPulseError, DocumentError
+from docpulse.cache import LLMOutcome, get_cache_dir, get_cached_or_generate
+from docpulse.config import Config, get_config_path, load_config, save_config
+from docpulse.errors import (
+    EXIT_GATEWAY,
+    EXIT_INTERNAL,
+    EXIT_OK,
+    EXIT_USAGE,
+    ConfigError,
+    DocPulseError,
+    DocumentError,
+    EmptyResultError,
+    UsageError,
+)
 from docpulse.llm import ICAGatewayClient
 from docpulse.longdoc import prepare_content
 from docpulse.models import ParsedDocument
@@ -47,7 +59,11 @@ from docpulse.prompts import (
     SYSTEM_PROMPT,
 )
 from docpulse.renderers import (
+    _ensure_utf8,
+    build_anki_rows,
     console,
+    err_console,
+    format_anki_deck,
     generate_document_map_mermaid,
     print_json,
     render_answer_with_citations_text,
@@ -59,6 +75,13 @@ from docpulse.renderers import (
     render_markdown_with_equations,
     render_prerequisites_text,
     render_study_mode_text,
+)
+from docpulse.retrieval import (
+    BM25Index,
+    build_passages,
+    render_passages,
+    section_scores,
+    verify_evidence,
 )
 
 app = typer.Typer(
@@ -88,8 +111,13 @@ def options(ctx: typer.Context) -> AppContext:
 
 
 def make_client(config: Config, opts: AppContext, is_json: bool) -> ICAGatewayClient:
-    """Build a gateway client, announcing retries unless output must stay clean."""
-    if not config.api_key:
+    """Build a gateway client, announcing retries unless output must stay clean.
+
+    `is_json` doubles as "stdout must stay machine-readable": the keyless note
+    and retry progress lines are suppressed for JSON and raw-stdout commands
+    so they never corrupt a piped payload.
+    """
+    if not config.api_key and not is_json:
         console.print(
             "[yellow]Note:[/yellow] No API key configured. "
             "This is fine for keyless gateways; otherwise requests may fail with 401/403."
@@ -136,12 +164,18 @@ def fail(
     raise typer.Exit(EXIT_INTERNAL) from exc
 
 
-def show_warnings(warnings: list[str], *, is_json: bool) -> None:
-    """Print collected warnings; JSON commands carry them in the payload instead."""
+def show_warnings(warnings: list[str], *, is_json: bool, to_stderr: bool = False) -> None:
+    """Print collected warnings; JSON commands carry them in the payload instead.
+
+    `to_stderr` routes them to stderr for commands whose stdout is the payload.
+    """
     if is_json:
         return
     for warning in warnings:
-        console.print(f"[yellow]Warning:[/yellow] {warning}")
+        if to_stderr:
+            err_console.print(f"[yellow]Warning:[/yellow] {warning}")
+        else:
+            console.print(f"[yellow]Warning:[/yellow] {warning}")
 
 
 def truncation_warning(config: Config) -> str:
@@ -251,6 +285,11 @@ def main(
     ),
 ):
     """DocPulse CLI root callback."""
+    # Rich renders unicode checkmarks and equations on every command; a legacy
+    # Windows stream (cp1252) would crash mid-table on the first ✓/Σ. Same
+    # treatment JSON output already gets, for both human and pipe use.
+    _ensure_utf8(sys.stdout)
+    _ensure_utf8(sys.stderr)
     ctx.obj = AppContext(debug=debug, force_text=force_text)
 
 
@@ -348,6 +387,182 @@ def init():
     else:
         console.print(f"[bold red]✗ Connection check failed:[/bold red] {health.get('message')}")
         console.print("[dim]You can still use local document parsing or re-run 'docpulse init' when ready.[/dim]")
+
+
+def _cache_entries() -> tuple[list[Path], int]:
+    """Cached response files and their total size on disk."""
+    cache_dir = get_cache_dir()
+    if not cache_dir.is_dir():
+        return [], 0
+    entries: list[Path] = []
+    total = 0
+    for path in cache_dir.glob("*.json"):
+        try:
+            total += path.stat().st_size
+        except OSError:
+            continue
+        entries.append(path)
+    return entries, total
+
+
+def _human_size(num_bytes: int) -> str:
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
+        size /= 1024
+    return f"{num_bytes} B"
+
+
+@app.command()
+def cache(
+    ctx: typer.Context,
+    clear: bool = typer.Option(False, "--clear", help="Delete all cached LLM responses"),
+    format: str = typer.Option("text", "--format", "-f", help="Output format: 'text' or 'json'"),
+):
+    """Show the local response cache, or clear it with --clear."""
+    is_json = format.lower() == "json"
+
+    entries, _ = _cache_entries()
+    cleared_entries = 0
+    cleared_bytes = 0
+    if clear:
+        for path in entries:
+            try:
+                cleared_bytes += path.stat().st_size
+                path.unlink()
+            except OSError:
+                continue
+            cleared_entries += 1
+    entries_after, size_after = _cache_entries()
+
+    payload = {
+        "path": str(get_cache_dir()),
+        "entries": len(entries_after),
+        "size_bytes": size_after,
+        "cleared": clear,
+        "cleared_entries": cleared_entries,
+        "cleared_bytes": cleared_bytes,
+    }
+
+    if is_json:
+        print_json(payload)
+        return
+
+    console.print(f"[bold cyan]Cache:[/bold cyan] {payload['path']}")
+    if clear:
+        console.print(
+            f"[bold green]✓[/bold green] Cleared {cleared_entries} entries "
+            f"({_human_size(cleared_bytes)} freed); {len(entries_after)} remain."
+        )
+    else:
+        console.print(f"[dim]Entries:[/dim] {len(entries_after)} ({_human_size(size_after)})")
+        if entries_after:
+            console.print("[dim]Run 'docpulse cache --clear' to remove them all.[/dim]")
+        else:
+            console.print("[dim]Cache is empty; it fills automatically on first use.[/dim]")
+
+
+@app.command()
+def doctor(
+    ctx: typer.Context,
+    no_network: bool = typer.Option(False, "--no-network", help="Skip the gateway reachability probe"),
+    format: str = typer.Option("text", "--format", "-f", help="Output format: 'text' or 'json'"),
+):
+    """Diagnose configuration, cache, parsers, and gateway connectivity."""
+    is_json = format.lower() == "json"
+    checks: list[dict[str, str]] = []
+
+    def add(name: str, status: str, detail: str) -> None:
+        checks.append({"name": name, "status": status, "detail": detail})
+
+    add("docpulse", "pass", f"version {__version__} - Python {platform.python_version()}")
+
+    config_path = get_config_path()
+    if config_path.exists():
+        add("config file", "pass", str(config_path))
+    else:
+        add("config file", "warn", f"not found at {config_path} (environment variables may still apply)")
+
+    config = load_config()
+    config_ok = True
+    try:
+        config.validate_for_command()
+        redacted = config.redacted()
+        add(
+            "config",
+            "pass",
+            f"endpoint={redacted['endpoint_url']} - namespace={redacted['namespace']} "
+            f"- model={redacted['model_id']}",
+        )
+    except ConfigError as exc:
+        config_ok = False
+        add("config", "fail", exc.message)
+
+    if config.api_key:
+        add("api key", "pass", "configured (value redacted)")
+    else:
+        add("api key", "warn", "no API key set - fine for keyless gateways, otherwise expect 401/403")
+
+    entries, cache_size = _cache_entries()
+    if get_cache_dir().is_dir():
+        add("cache", "pass", f"{len(entries)} entries ({_human_size(cache_size)}) at {get_cache_dir()}")
+    else:
+        add("cache", "pass", f"empty (will be created at {get_cache_dir()})")
+
+    try:
+        import pypdf
+
+        add("pdf parser", "pass", f"pypdf {getattr(pypdf, '__version__', 'unknown')}")
+    except ImportError:
+        add("pdf parser", "warn", "pypdf is not installed - PDF documents cannot be parsed")
+
+    if no_network:
+        add("gateway", "skip", "skipped (--no-network)")
+    elif not config_ok:
+        add("gateway", "skip", "skipped (configuration is invalid)")
+    else:
+        if is_json:
+            health = ICAGatewayClient(config).check_health()
+        else:
+            with console.status("[bold cyan]Probing gateway...", spinner="dots"):
+                health = ICAGatewayClient(config).check_health()
+        if health["status"] == "ok":
+            models_info = f", {health['models_count']} items" if "models_count" in health else ""
+            add("gateway", "pass", f"reachable: {health.get('endpoint')}{models_info}")
+        elif health["status"] == "warning":
+            add("gateway", "warn", str(health.get("message")))
+        else:
+            add("gateway", "fail", str(health.get("message")))
+
+    failed = [c for c in checks if c["status"] == "fail"]
+    warned = [c for c in checks if c["status"] == "warn"]
+    if not failed:
+        exit_code = EXIT_OK
+    elif {c["name"] for c in failed} & {"config", "config file"}:
+        exit_code = EXIT_USAGE
+    elif any(c["name"] == "gateway" for c in failed):
+        exit_code = EXIT_GATEWAY
+    else:
+        exit_code = EXIT_INTERNAL
+    verdict = "ok" if not failed else "failed"
+    if is_json:
+        print_json({"status": verdict, "checks": checks, "warnings": len(warned)})
+        raise typer.Exit(exit_code)
+
+    icons = {"pass": "[green]✓ pass[/green]", "warn": "[yellow]! warn[/yellow]", "fail": "[red]✗ fail[/red]", "skip": "[dim]- skip[/dim]"}
+    table = Table(title="DocPulse Doctor", show_header=True, header_style="bold magenta")
+    table.add_column("Check", style="cyan")
+    table.add_column("Status", width=10)
+    table.add_column("Detail")
+    for check in checks:
+        table.add_row(check["name"], icons.get(check["status"], check["status"]), check["detail"])
+    console.print(table)
+    if failed:
+        console.print(f"[bold red]{len(failed)} check(s) failed[/bold red] ({len(warned)} warning(s)).")
+    else:
+        console.print(f"[bold green]All checks passed[/bold green] ({len(warned)} warning(s)).")
+    raise typer.Exit(exit_code)
 
 
 @app.command()
@@ -869,6 +1084,131 @@ def study(
 
 
 @app.command()
+def drill(
+    ctx: typer.Context,
+    doc: Path = typer.Argument(..., help="Path to document file"),
+    questions: int = typer.Option(5, "--questions", "-q", help="Number of quiz questions to generate"),
+    no_cache: bool = typer.Option(False, "--no-cache", help="Bypass the response cache and force a fresh LLM call"),
+):
+    """Run an interactive flashcard drill with self-grading and a score summary."""
+    opts = options(ctx)
+    config = load_config()
+    context = {"document": doc.name, "command": "drill"}
+
+    try:
+        config.validate_for_command()
+        client = make_client(config, opts, False)
+        parsed = load_document(doc, opts, False)
+
+        raw_result, warnings = generate_from_document(
+            client,
+            config,
+            parsed.raw_text,
+            lambda content: STUDY_PROMPT.format(num_questions=questions, content=content),
+            status_label="[bold green]Preparing drill deck...",
+            no_cache=no_cache,
+            system_prompt=JSON_SYSTEM_PROMPT,
+            quiet=False,
+        )
+        result = parse_study_response(raw_result, parsed.file_name, warnings)
+    except typer.Exit:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        fail(exc, is_json=False, opts=opts, context=context)
+
+    show_warnings(warnings, is_json=False)
+
+    cards = build_anki_rows(result)
+    if not cards:
+        fail(
+            EmptyResultError(
+                "The model returned no flashcards or questions to drill.",
+                hint="Re-run with --no-cache, or try a different document.",
+            ),
+            is_json=False,
+            opts=opts,
+            context=context,
+        )
+
+    console.print(
+        f"[bold cyan]DRILL: {parsed.file_name}[/bold cyan] [dim]- {len(cards)} cards. "
+        "Type 'q' at any prompt to stop.[/dim]"
+    )
+
+    hits = 0
+    misses = 0
+    skipped = 0
+    quit_early = False
+
+    for idx, (front, back) in enumerate(cards, start=1):
+        console.print()
+        console.print(
+            Panel(
+                Text(front),
+                title=f"Card {idx}/{len(cards)}",
+                border_style="cyan",
+                expand=False,
+            )
+        )
+        try:
+            action = Prompt.ask("[dim]Enter = reveal answer, s = skip, q = quit[/dim]", default="")
+        except (EOFError, KeyboardInterrupt):
+            console.print()
+            break
+        action = action.strip().lower()
+        if action in {"q", "quit"}:
+            quit_early = True
+            break
+        if action in {"s", "skip"}:
+            skipped += 1
+            continue
+
+        console.print(
+            Panel(
+                Text(back, style="green"),
+                title="Answer",
+                border_style="green",
+                expand=False,
+            )
+        )
+        try:
+            grade = Prompt.ask("[bold]Did you recall it?[/bold]", choices=["h", "m"], default="h")
+        except (EOFError, KeyboardInterrupt):
+            console.print()
+            break
+        if grade == "h":
+            hits += 1
+        else:
+            misses += 1
+
+    graded = hits + misses
+    score = (100.0 * hits / graded) if graded else 0.0
+
+    score_color = "green" if score >= 80 else "yellow" if score >= 50 else "red"
+    score_line = f"[bold {score_color}]{score:.0f}%[/bold {score_color}]" if graded else "[dim]no cards graded[/dim]"
+    body = (
+        f"[dim]Cards:[/dim] {len(cards)}    "
+        f"[dim]Graded:[/dim] {graded}    "
+        f"[green]Hits:[/green] {hits}    "
+        f"[red]Misses:[/red] {misses}    "
+        f"[dim]Skipped:[/dim] {skipped}\n\n"
+        f"[dim]Score:[/dim]  {score_line}"
+    )
+    if quit_early or skipped:
+        body += "\n\n[dim]Run 'docpulse drill' again to retest the remaining cards.[/dim]"
+    console.print()
+    console.print(
+        Panel(
+            body,
+            title="[bold cyan]Drill Summary[/bold cyan]",
+            border_style="cyan",
+            expand=False,
+            padding=(0, 2),
+        )
+    )
+
+
+@app.command()
 def export(
     ctx: typer.Context,
     doc: Path = typer.Argument(..., help="Path to document file"),
@@ -922,6 +1262,83 @@ def export(
 
 
 @app.command()
+def anki(
+    ctx: typer.Context,
+    doc: Path = typer.Argument(..., help="Path to document file"),
+    output: Path | None = typer.Option(None, "--output", "-o", help="Write the deck to this file instead of stdout"),
+    format: str = typer.Option("tsv", "--format", "-f", help="Deck format: 'tsv' (Anki default) or 'csv'"),
+    questions: int = typer.Option(5, "--questions", "-q", help="Number of quiz questions to generate"),
+    no_questions: bool = typer.Option(False, "--no-questions", help="Export flashcards only, skipping quiz questions"),
+    no_cache: bool = typer.Option(False, "--no-cache", help="Bypass the response cache and force a fresh LLM call"),
+):
+    """Export flashcards and quiz questions as an Anki-importable deck."""
+    opts = options(ctx)
+    config = load_config()
+    fmt = format.lower()
+    context = {"document": doc.name, "command": "anki"}
+
+    if fmt not in ("tsv", "csv"):
+        fail(
+            UsageError(f"Unsupported deck format: {format!r}", hint="Use 'tsv' (default) or 'csv'."),
+            is_json=False,
+            opts=opts,
+            context=context,
+        )
+
+    # Without --output the deck itself is stdout, so every status line must
+    # stay off stdout (spinner off, warnings to stderr, keyless note off).
+    stdout_clean = output is None
+
+    try:
+        config.validate_for_command()
+        client = make_client(config, opts, stdout_clean)
+        parsed = load_document(doc, opts, stdout_clean)
+
+        raw_result, warnings = generate_from_document(
+            client,
+            config,
+            parsed.raw_text,
+            lambda content: STUDY_PROMPT.format(num_questions=questions, content=content),
+            status_label="[bold green]Building Anki deck...",
+            no_cache=no_cache,
+            system_prompt=JSON_SYSTEM_PROMPT,
+            quiet=stdout_clean,
+        )
+        result = parse_study_response(raw_result, parsed.file_name, warnings)
+
+        rows = build_anki_rows(result, include_questions=not no_questions)
+        if not rows:
+            raise EmptyResultError(
+                "No flashcards or questions could be extracted for the deck.",
+                hint="Re-run with --no-cache, or drop --no-questions if the document has no flashcards.",
+            )
+        payload = format_anki_deck(rows, fmt)
+
+        if output is not None:
+            try:
+                with open(output, "w", encoding="utf-8", newline="") as f:
+                    f.write(payload)
+            except OSError as exc:
+                raise DocumentError(f"Could not write to {output}: {exc}") from exc
+    except typer.Exit:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        fail(exc, is_json=False, opts=opts, context=context)
+
+    if stdout_clean:
+        show_warnings(warnings, is_json=False, to_stderr=True)
+        sys.stdout.write(payload if payload.endswith("\n") else payload + "\n")
+        return
+
+    show_warnings(warnings, is_json=False)
+    console.print(
+        f"[bold green]✓ Anki deck exported:[/bold green] [cyan]{output}[/cyan] "
+        f"[dim]({len(rows)} cards, {fmt.upper()})[/dim]"
+    )
+    console.print("[dim]Import via Anki: File > Import, choose the file, separator = Tab (or Comma for CSV).[/dim]")
+
+
+@app.command()
 def ask(
     ctx: typer.Context,
     doc: Path = typer.Argument(..., help="Path to document file"),
@@ -957,9 +1374,15 @@ def ask(
                 raise typer.Exit(DocumentError.exit_code)
             doc_label = f"{parsed.file_name} (section {sec.id}: {sec.title})"
             source_text = sec.content or sec.title
+            scope_sections = [sec]
         else:
             doc_label = parsed.file_name
             source_text = parsed.raw_text
+            scope_sections = parsed.sections
+
+        # Local BM25 index: grounds `--citations` answers in retrieved passages
+        # and lets each returned citation be verified against the source text.
+        index = BM25Index(build_passages(scope_sections))
 
         mapper = chunk_mapper(client, config, no_cache)
 
@@ -985,14 +1408,19 @@ def ask(
 
     messages: list[dict[str, str]] = []
     first_turn = True
+    last_question = ""
 
     def ask_once(user_question: str) -> LLMOutcome:
-        nonlocal first_turn
+        nonlocal first_turn, last_question
         sys_prompt = JSON_SYSTEM_PROMPT if citations else SYSTEM_PROMPT
         if first_turn:
+            last_question = user_question
             if citations:
                 prompt_content = ASK_CITATIONS_PROMPT.format(
-                    doc_name=doc_label, content=prepared.text, question=user_question
+                    doc_name=doc_label,
+                    content=prepared.text,
+                    question=user_question,
+                    passages=render_passages(index.search(user_question, top_k=5)),
                 )
             else:
                 prompt_content = ASK_FIRST_PROMPT.format(
@@ -1017,6 +1445,11 @@ def ask(
         if citations:
             answer_warnings: list[str] = []
             evidence_result = parse_answer_with_citations(outcome.content, parsed, answer_warnings)
+            verify_evidence(
+                evidence_result.evidence,
+                scope_sections,
+                section_scores(index, last_question) if last_question else {},
+            )
             turn_warnings += answer_warnings
             evidence_result.was_cached = outcome.was_cached
             if is_json:

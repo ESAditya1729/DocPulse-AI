@@ -189,6 +189,14 @@ class CitationEvidence(BaseModel):
     section_title: str | None = None
     page: int | None = None
     excerpt: str | None = None
+    verified: bool | None = Field(
+        default=None,
+        description="Whether the excerpt was found in the cited section by local BM25 verification",
+    )
+    score: float | None = Field(
+        default=None,
+        description="BM25 retrieval score of the cited section for this question",
+    )
 
 
 class AnswerWithEvidence(BaseModel):
