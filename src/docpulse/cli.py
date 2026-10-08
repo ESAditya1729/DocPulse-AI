@@ -19,6 +19,7 @@ from docpulse.analyzers import (
     parse_concepts_response,
     parse_equations_response,
     parse_prerequisites_response,
+    parse_sources_response,
     parse_study_response,
 )
 from docpulse.cache import LLMOutcome, get_cached_or_generate
@@ -40,6 +41,7 @@ from docpulse.prompts import (
     MAP_PROMPT,
     PREREQUISITES_PROMPT,
     SECTION_PROMPT,
+    SOURCES_JSON_PROMPT,
     SOURCES_PROMPT,
     STUDY_PROMPT,
     SYSTEM_PROMPT,
@@ -189,19 +191,8 @@ def generate_from_document(
     Returns (result, warnings) so callers can tell the user that the response
     was cut short or that part of a very large document went unread.
     """
-
-    def map_chunk(chunk: str, index: int, total: int) -> str:
-        outcome = get_cached_or_generate(
-            client,
-            config,
-            system_prompt=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": MAP_PROMPT.format(index=index, total=total, content=chunk)}],
-            use_cache=not no_cache,
-        )
-        return outcome.content
-
     prepared = prepare_content(
-        map_chunk,
+        chunk_mapper(client, config, no_cache),
         source_text,
         on_progress=(lambda i, n: console.print(f"[dim]Summarizing excerpt {i}/{n}...[/dim]")) if not quiet else None,
     )
@@ -684,7 +675,7 @@ def document_map(
     format: str = typer.Option("text", "--format", "-f", help="Output format: 'text', 'json', or 'mermaid'"),
     no_cache: bool = typer.Option(False, "--no-cache", help="Bypass the response cache and force a fresh LLM call"),
 ):
-    """Generate a unified structural map connecting sections, concepts, prerequisites, and equations."""
+    """Generate a unified structural map connecting sections, concepts, prerequisites, equations, and references."""
     opts = options(ctx)
     config = load_config()
     fmt = format.lower()
@@ -736,6 +727,19 @@ def document_map(
         )
         warnings += w3
         eqs_res = parse_equations_response(raw_e, parsed.file_name, warnings)
+
+        raw_r, w4 = generate_from_document(
+            client,
+            config,
+            parsed.raw_text,
+            lambda content: SOURCES_JSON_PROMPT.format(content=content),
+            status_label="[bold green]Mapping references...",
+            no_cache=no_cache,
+            system_prompt=JSON_SYSTEM_PROMPT,
+            quiet=is_non_text,
+        )
+        warnings += w4
+        references = parse_sources_response(raw_r, warnings)
     except typer.Exit:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -746,7 +750,7 @@ def document_map(
         concepts=concepts_res.concepts,
         prerequisites=prereqs_res.prerequisites,
         equations=eqs_res.equations,
-        references=[],
+        references=references,
     )
 
     if fmt == "json":

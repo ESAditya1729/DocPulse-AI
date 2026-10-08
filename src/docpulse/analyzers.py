@@ -297,6 +297,40 @@ def parse_equations_response(
 
 
 # ---------------------------------------------------------------------------
+# Sources / References Analyzer
+# ---------------------------------------------------------------------------
+
+
+def parse_sources_response(raw_response: str, warnings: list[str] | None = None) -> list[str]:
+    """Parse and validate LLM output for external references into a flat list."""
+    data = _extract_json_block(raw_response)
+    _collect_warnings(data, raw_response, warnings, UNPARSEABLE_JSON_WARNING)
+
+    if isinstance(data, dict):
+        raw_list = data.get("references", [])
+    elif isinstance(data, list):
+        raw_list = data
+    else:
+        raw_list = []
+
+    references: list[str] = []
+    if raw_list and isinstance(raw_list, list):
+        for item in raw_list:
+            if isinstance(item, dict):
+                text = str(
+                    item.get("citation") or item.get("name") or item.get("url") or item.get("title") or ""
+                ).strip()
+            elif item is not None:
+                text = str(item).strip()
+            else:
+                text = ""
+            if text and text.lower() not in {"none", "none explicitly cited", "n/a"}:
+                references.append(text)
+
+    return references
+
+
+# ---------------------------------------------------------------------------
 # Document Map Builder
 # ---------------------------------------------------------------------------
 

@@ -261,6 +261,7 @@ def test_cli_map_command_text_json_mermaid(mock_client_cls, tmp_path):
         LLMResponse(content='{"concepts": [{"name": "Transformer", "importance": "high"}]}', model="m"),
         LLMResponse(content='{"prerequisites": [{"name": "Calculus", "importance": "medium"}]}', model="m"),
         LLMResponse(content='{"equations": []}', model="m"),
+        LLMResponse(content='{"references": ["Attention Is All You Need (arXiv:1706.03762)"]}', model="m"),
     ]
     mock_client_cls.return_value = mock_client
 
@@ -269,26 +270,32 @@ def test_cli_map_command_text_json_mermaid(mock_client_cls, tmp_path):
     assert res_text.exit_code == 0
     assert "DOCUMENT MAP" in res_text.output
     assert "Transformer" in res_text.output
+    assert "References & Sources" in res_text.output
+    assert "Attention Is All You Need" in res_text.output
 
     # JSON mode
     mock_client.chat_complete.side_effect = [
         LLMResponse(content='{"concepts": [{"name": "Transformer", "importance": "high"}]}', model="m"),
         LLMResponse(content='{"prerequisites": [{"name": "Calculus", "importance": "medium"}]}', model="m"),
         LLMResponse(content='{"equations": []}', model="m"),
+        LLMResponse(content='{"references": ["Attention Is All You Need (arXiv:1706.03762)"]}', model="m"),
     ]
     res_json = runner.invoke(app, ["map", str(sample_file), "--format", "json"])
     assert res_json.exit_code == 0
     assert '"core_concepts"' in res_json.output
+    assert "Attention Is All You Need" in res_json.output
 
     # Mermaid mode
     mock_client.chat_complete.side_effect = [
         LLMResponse(content='{"concepts": [{"name": "Transformer", "importance": "high"}]}', model="m"),
         LLMResponse(content='{"prerequisites": [{"name": "Calculus", "importance": "medium"}]}', model="m"),
         LLMResponse(content='{"equations": []}', model="m"),
+        LLMResponse(content='{"references": ["Attention Is All You Need (arXiv:1706.03762)"]}', model="m"),
     ]
     res_mermaid = runner.invoke(app, ["map", str(sample_file), "--format", "mermaid"])
     assert res_mermaid.exit_code == 0
     assert "graph TD" in res_mermaid.output
+    assert "subgraph References" in res_mermaid.output
 
 
 @patch("docpulse.cli.ICAGatewayClient")

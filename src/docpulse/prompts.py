@@ -77,6 +77,19 @@ Output format (Markdown):
 (List datasets or write 'None explicitly cited')
 """
 
+SOURCES_JSON_PROMPT = """Extract all external references, cited academic papers, GitHub repositories, datasets, tools, and URLs from the following document content.
+Output a JSON object with this exact structure:
+{{
+  "references": ["Short citation, repository, dataset, tool, or URL"]
+}}
+
+Keep each entry short (one line max) - a citation title, repo name, or bare URL.
+If the document cites no external references, return {{"references": []}}.
+
+Document Content:
+\"\"\"{content}\"\"\"
+"""
+
 MAP_PROMPT = """You are condensing part {index} of {total} of a larger document into dense notes for later synthesis.
 Preserve concrete facts, definitions, equations (verbatim), names, numbers, and arguments. Do not add commentary,
 do not omit specifics for brevity, and do not try to summarize the whole document - just this excerpt.

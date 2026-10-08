@@ -9,6 +9,7 @@ from docpulse.analyzers import (
     parse_concepts_response,
     parse_equations_response,
     parse_prerequisites_response,
+    parse_sources_response,
     parse_study_response,
 )
 from docpulse.models import ParsedDocument, Section
@@ -237,3 +238,42 @@ def test_parse_answer_with_citations_json():
     assert len(res.evidence) == 1
     assert res.evidence[0].section == "3.2"
     assert res.evidence[0].page == 4
+
+
+def test_parse_sources_valid_json_list():
+    refs = parse_sources_response(json.dumps({"references": ["Attention Is All You Need", "https://arxiv.org/abs/1706.03762"]}))
+    assert refs == ["Attention Is All You Need", "https://arxiv.org/abs/1706.03762"]
+
+
+def test_parse_sources_with_markdown_fences():
+    text = 'Here you go:\n```json\n{"references": ["PyTorch docs"]}\n```\nHope that helps!'
+    assert parse_sources_response(text) == ["PyTorch docs"]
+
+
+def test_parse_sources_filters_placeholder_and_dict_entries():
+    data = {
+        "references": [
+            {"citation": "Vaswani et al., 2017"},
+            {"url": "https://github.com/example/repo"},
+            "None explicitly cited",
+            "n/a",
+            "",
+            None,
+        ]
+    }
+    refs = parse_sources_response(json.dumps(data))
+    assert refs == ["Vaswani et al., 2017", "https://github.com/example/repo"]
+
+
+def test_parse_sources_unparseable_yields_empty_and_warning():
+    warnings: list[str] = []
+    refs = parse_sources_response("I could not find any references, sorry!", warnings)
+    assert refs == []
+    assert warnings
+
+
+def test_parse_sources_empty_references_is_valid_not_a_warning():
+    warnings: list[str] = []
+    refs = parse_sources_response(json.dumps({"references": []}), warnings)
+    assert refs == []
+    assert warnings == []
