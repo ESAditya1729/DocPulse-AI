@@ -55,7 +55,7 @@ graph TD
 
 ### Learn
 - **`docpulse study <doc>`** — Interactive study guide generator with key concepts, prerequisite review topics, active-recall flashcards, and self-assessment questions (conceptual, multiple-choice, short-answer).
-- **`docpulse drill <doc>`** — Interactive flashcard drill with self-grading (hit / miss / skip) and a colour-coded final score panel — the study loop closes, right in the terminal.
+- **`docpulse drill <doc>`** — Interactive flashcard drill with self-grading (hit / miss / skip) and a color-coded final score panel — the study loop closes, right in the terminal.
 - **`docpulse anki <doc>`** — Export flashcards and quiz questions as an **Anki-importable deck** (TSV or CSV), with `--output <file>` for file output or piping straight to stdout.
 - **`docpulse export <doc>`** — Export a complete study guide as a Markdown README or JSON file.
 
@@ -98,8 +98,11 @@ DocPulse connects to an **IBM ICA Gateway** endpoint. Run `docpulse init` once t
 | `DOCPULSE_NAMESPACE` | Gateway namespace (`chat-models`, `assistants`, `agents`, `digital-workforce`) |
 | `DOCPULSE_MODEL_ID` | Model or assistant ID to use |
 | `DOCPULSE_CACHE_DIR` | Override the default cache directory (`~/.docpulse/cache`) |
+| `DOCPULSE_CONFIG_PATH` | Override the config file location (default `~/.docpulse/config.json`) |
 
 Configuration is saved to `~/.docpulse/config.json`. Environment variables take precedence over the config file. Run `docpulse doctor` at any time to verify your setup.
+
+The legacy aliases `ICA_ENDPOINT_URL`, `ICA_API_KEY`, `ICA_NAMESPACE`, and `ICA_MODEL_ID` are also accepted; each `DOCPULSE_*` variable takes precedence over its `ICA_*` counterpart.
 
 ---
 
@@ -117,6 +120,9 @@ Interactive setup — enter your endpoint, optional API key, namespace, and mode
 ```bash
 # Full document analysis with executive summary
 docpulse analyze paper.pdf
+
+# Raw model response, printed as-is instead of the formatted Markdown panel
+docpulse analyze paper.pdf --raw
 
 # Structured concept index (sorted by importance)
 docpulse concepts paper.pdf
@@ -207,6 +213,9 @@ docpulse cache --format json
 ## Global Flags
 
 ```bash
+# Print the installed version and exit (also `-v`)
+docpulse --version
+
 # Print full tracebacks for unexpected errors
 docpulse --debug analyze paper.pdf
 
@@ -214,7 +223,7 @@ docpulse --debug analyze paper.pdf
 docpulse --force-text analyze notes.rst
 ```
 
-Both flags go **before** the subcommand name.
+These flags go **before** the subcommand name.
 
 > `--force-text` is an escape hatch, not a converter. It reads raw bytes as UTF-8 text, so it is not a substitute for OCR on scanned PDFs or HTML rendering.
 
@@ -318,7 +327,7 @@ DocPulse follows clean architectural separation:
 | `docpulse.models` | Typed Pydantic schemas for documents, concepts, prerequisites, equations, comparisons, and study guides |
 | `docpulse.parsers` | Modular parsers for PDF, Markdown, and TXT files; normalizes all formats into a unified document structure |
 | `docpulse.analyzers` | Parses, validates, and structures raw LLM output into typed domain objects |
-| `docpulse.renderers` | Rich terminal UI (coloured panels, Unicode math), JSON serialization, and Mermaid diagram generation |
+| `docpulse.renderers` | Rich terminal UI (colored panels, Unicode math), JSON serialization, and Mermaid diagram generation |
 | `docpulse.retrieval` | Dependency-free BM25 passage retrieval and citation verification for `ask --citations` |
 | `docpulse.mathbox` | Extracts and prettifies inline/display math into Unicode for readable terminal output |
 | `docpulse.longdoc` | Chunked map-reduce preparation for large documents, with explicit truncation feedback |

@@ -28,3 +28,6 @@ htmlcov/
 # DocPulse local config (contains API key) — never commit this
 .docpulse/
 config.json
+
+#do not include the additional documentation files generated
+DocPulse-LightHouse-Documentation.md

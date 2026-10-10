@@ -10,6 +10,7 @@ from typing import Any
 from rich.console import Console, Group
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
 from rich.tree import Tree
 
@@ -28,6 +29,24 @@ console = Console()
 # Warnings for commands that write their payload to stdout (e.g. `anki` piping
 # into a file or another tool) go here so stdout stays machine-readable.
 err_console = Console(stderr=True)
+
+# Shared styling scales for the importance/difficulty badges used by the
+# concepts and prerequisites renderers. Kept here so both renderers - and any
+# future one - stay visually consistent instead of redefining their own.
+_IMPORTANCE_ORDER = {"high": 0, "medium": 1, "low": 2}
+_IMPORTANCE_BORDER = {"high": "red", "medium": "yellow", "low": "green"}
+_IMPORTANCE_BADGE = {
+    "high": "[bold red]● High[/bold red]",
+    "medium": "[bold yellow]◑ Medium[/bold yellow]",
+    "low": "[dim green]○ Low[/dim green]",
+}
+_DIFFICULTY_BADGE = {
+    "beginner": "[bold green]▲ Beginner[/bold green]",
+    "low": "[bold green]▲ Low[/bold green]",
+    "medium": "[bold yellow]▲▲ Medium[/bold yellow]",
+    "high": "[bold red]▲▲▲ High[/bold red]",
+    "advanced": "[bold red]▲▲▲ Advanced[/bold red]",
+}
 
 
 def render_markdown_with_equations(markdown_text: str) -> Markdown | Group:
@@ -124,21 +143,13 @@ def render_concepts_text(result: ConceptIndexResult) -> None:
     )
     console.print()
 
-    _IMP_BORDER = {"high": "red", "medium": "yellow", "low": "green"}
-    _IMP_BADGE  = {
-        "high":   "[bold red]● High[/bold red]",
-        "medium": "[bold yellow]◑ Medium[/bold yellow]",
-        "low":    "[dim green]○ Low[/dim green]",
-    }
-
     # Sort: high importance first, then medium, then low
-    _imp_order = {"high": 0, "medium": 1, "low": 2}
-    ordered = sorted(result.concepts, key=lambda c: _imp_order.get(c.importance.lower(), 1))
+    ordered = sorted(result.concepts, key=lambda c: _IMPORTANCE_ORDER.get(c.importance.lower(), 1))
 
     for idx, c in enumerate(ordered, start=1):
         imp_key   = c.importance.lower()
-        border    = _IMP_BORDER.get(imp_key, "cyan")
-        imp_badge = _IMP_BADGE.get(imp_key, f"[cyan]{c.importance.capitalize()}[/cyan]")
+        border    = _IMPORTANCE_BORDER.get(imp_key, "cyan")
+        imp_badge = _IMPORTANCE_BADGE.get(imp_key, f"[cyan]{c.importance.capitalize()}[/cyan]")
         sections_str = "  ".join(f"[bold cyan]§{s}[/bold cyan]" for s in c.sections) if c.sections else "[dim]General[/dim]"
 
         lines: list[str] = []
@@ -190,26 +201,15 @@ def render_prerequisites_text(result: PrerequisiteResult) -> None:
     )
     console.print()
 
-    _IMP_BORDER = {"high": "red", "medium": "yellow", "low": "green"}
-    _IMP_BADGE  = {"high": "[bold red]● High[/bold red]", "medium": "[bold yellow]◑ Medium[/bold yellow]", "low": "[dim green]○ Low[/dim green]"}
-    _DIFF_BADGE = {
-        "beginner":  "[bold green]▲ Beginner[/bold green]",
-        "low":       "[bold green]▲ Low[/bold green]",
-        "medium":    "[bold yellow]▲▲ Medium[/bold yellow]",
-        "high":      "[bold red]▲▲▲ High[/bold red]",
-        "advanced":  "[bold red]▲▲▲ Advanced[/bold red]",
-    }
-
     # Sort: high importance first, then medium, then low
-    _imp_order = {"high": 0, "medium": 1, "low": 2}
-    ordered = sorted(result.prerequisites, key=lambda p: _imp_order.get(p.importance.lower(), 1))
+    ordered = sorted(result.prerequisites, key=lambda p: _IMPORTANCE_ORDER.get(p.importance.lower(), 1))
 
     for idx, p in enumerate(ordered, start=1):
         imp_key   = p.importance.lower()
         diff_key  = p.difficulty.lower()
-        border    = _IMP_BORDER.get(imp_key, "cyan")
-        imp_badge = _IMP_BADGE.get(imp_key, f"[cyan]{p.importance.capitalize()}[/cyan]")
-        diff_badge = _DIFF_BADGE.get(diff_key, f"[white]{p.difficulty.capitalize()}[/white]")
+        border    = _IMPORTANCE_BORDER.get(imp_key, "cyan")
+        imp_badge = _IMPORTANCE_BADGE.get(imp_key, f"[cyan]{p.importance.capitalize()}[/cyan]")
+        diff_badge = _DIFFICULTY_BADGE.get(diff_key, f"[white]{p.difficulty.capitalize()}[/white]")
 
         lines: list[str] = []
         lines.append(f"[dim]Importance:[/dim]  {imp_badge}    [dim]Difficulty:[/dim]  {diff_badge}")
@@ -242,23 +242,37 @@ def render_prerequisites_text(result: PrerequisiteResult) -> None:
 
 
 def render_equations_text(result: EquationResult) -> None:
-    """Render mathematical equations with variables and explanations."""
+    """Render mathematical equations with variables and explanations.
+
+    Mirrors the concepts/prerequisites renderers: one header panel for the
+    document, then one bordered panel per equation (with the equation id in its
+    title) followed by its variables, concepts, and explanation.
+    """
     if not result.equations:
         console.print("[yellow]No mathematical equations identified in the document.[/yellow]")
         return
 
-    console.print(f"[bold cyan]Equations ({len(result.equations)} identified)[/bold cyan]")
-    console.print("[dim]" + "─" * 40 + "[/dim]")
+    total = len(result.equations)
+    console.print(
+        Panel(
+            f"[bold white]{result.document}[/bold white]\n"
+            f"[dim]{total} equation{'s' if total != 1 else ''} identified[/dim]",
+            title="[bold cyan]Equation Index[/bold cyan]",
+            border_style="cyan",
+            expand=False,
+            padding=(0, 2),
+        )
+    )
+    console.print()
 
     for eq in result.equations:
-        console.print(f"\n[bold magenta]Equation {eq.id}[/bold magenta]")
-        console.print("[dim]" + "─" * 20 + "[/dim]")
-
-        # Equation box
+        # Equation box - the id lives in the panel title to match the numbered
+        # panels used by the concepts and prerequisites renderers.
         display_math = eq.readable or prettify_math(eq.latex) or eq.latex
         console.print(
             Panel(
                 Text(display_math, justify="center", style="bold white"),
+                title=f"[bold magenta]Equation {eq.id}[/bold magenta]",
                 border_style="magenta",
                 expand=False,
                 padding=(0, 2),
@@ -281,6 +295,8 @@ def render_equations_text(result: EquationResult) -> None:
 
         if eq.usage:
             console.print(f"[dim]Usage:[/dim] {eq.usage}")
+
+        console.print()
 
 
 # ---------------------------------------------------------------------------
@@ -444,8 +460,6 @@ def generate_document_map_mermaid(result: DocumentMapResult) -> str:
 
 def render_comparison_text(result: DocumentComparisonResult) -> None:
     """Render comparison between two documents with structured panels."""
-    from rich.table import Table
-
     # Header
     console.print(
         Panel(
