@@ -18,6 +18,19 @@ RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 # Never sleep longer than this between attempts, even if Retry-After asks for it.
 MAX_RETRY_DELAY = 30.0
 
+# Substrings that mark a gateway error body as an unknown/unusable *model* rather
+# than a bad URL or namespace. Used so the failure is attributed to the model id
+# instead of being reported as a bogus endpoint/namespace configuration problem.
+_MODEL_ERROR_MARKERS = (
+    "not found",
+    "unknown",
+    "does not exist",
+    "no such",
+    "invalid",
+    "unsupported",
+    "not available",
+)
+
 
 class LLMMessage(BaseModel):
     role: str
@@ -75,6 +88,40 @@ def _parse_retry_after(resp: httpx.Response) -> float | None:
         return None
 
 
+def _looks_like_model_error(detail: str) -> bool:
+    """True when a gateway error body reads like an unknown/unusable model id."""
+    lower = detail.lower()
+    return "model" in lower and any(marker in lower for marker in _MODEL_ERROR_MARKERS)
+
+
+def _extract_models(data: Any) -> list[dict[str, Any]]:
+    """Normalize a /models response into a list of model dicts.
+
+    Gateways return the list under different keys (or as a bare list), and an
+    entry may be a plain id string. Accept all of those so discovery doesn't
+    silently come back empty - an empty list is indistinguishable from "no
+    models", which is what made a misconfigured model hard to diagnose.
+    """
+    if isinstance(data, list):
+        raw: list[Any] = data
+    elif isinstance(data, dict):
+        raw = []
+        for key in ("data", "models", "items"):
+            value = data.get(key)
+            if isinstance(value, list):
+                raw = value
+                break
+    else:
+        raw = []
+    models: list[dict[str, Any]] = []
+    for item in raw:
+        if isinstance(item, dict):
+            models.append(item)
+        elif isinstance(item, str) and item.strip():
+            models.append({"id": item.strip()})
+    return models
+
+
 class ICAGatewayClient:
     """Client for interacting with the IBM ICA Gateway."""
 
@@ -123,12 +170,22 @@ class ICAGatewayClient:
                 f"Gateway rejected the API key (HTTP {resp.status_code}) at {url}.",
                 hint="Re-run 'docpulse init' to re-enter the key, or update DOCPULSE_API_KEY.",
             )
+        detail = self._error_detail(resp)
+        if _looks_like_model_error(detail):
+            return ConfigError(
+                f"Gateway rejected model '{self.config.model_id}' for namespace "
+                f"'{self.namespace}' (HTTP {resp.status_code}): {detail}",
+                hint=(
+                    "The configured model may not be available under this namespace. Run "
+                    "'docpulse init' to pick one from the gateway's list, or set DOCPULSE_MODEL_ID."
+                ),
+            )
         if resp.status_code == 404:
             return ConfigError(
                 f"Gateway returned 404 for {url} - the endpoint URL or namespace '{self.namespace}' is wrong.",
                 hint=SETUP_HINT,
             )
-        return LLMError(f"Gateway returned HTTP {resp.status_code} for {url}: {self._error_detail(resp)}")
+        return LLMError(f"Gateway returned HTTP {resp.status_code} for {url}: {detail}")
 
     def _request_timeout(self) -> httpx.Timeout:
         total = self.config.request_timeout
@@ -202,11 +259,7 @@ class ICAGatewayClient:
             ) from exc
         if resp.is_error:
             raise self._http_error(resp)
-        data = resp.json()
-        if not isinstance(data, dict):
-            return []
-        models = data.get("data", [])
-        return [m for m in models if isinstance(m, dict)] if isinstance(models, list) else []
+        return _extract_models(resp.json())
 
     def check_health(self) -> dict[str, Any]:
         """Perform a connection and health-check verification using OpenAPI namespace."""
@@ -287,6 +340,33 @@ class ICAGatewayClient:
             "message": f"Server returned status {resp.status_code}: {last_error_detail or self._error_detail(resp)}",
             "code": resp.status_code,
         }
+
+    def probe_chat(self) -> dict[str, Any]:
+        """Confirm the configured model can actually be called.
+
+        check_health() is satisfied by a 200 from GET /models, which says nothing
+        about whether config.model_id is callable under this namespace. This sends
+        a minimal chat request so a listed-but-unusable model is caught at setup
+        instead of on the first analysis command.
+        """
+        url = f"{self.base_url}/{self.namespace}/chat/completions"
+        client = get_shared_client()
+        try:
+            resp = client.post(
+                url,
+                headers=self.headers,
+                json={
+                    "model": self.config.model_id,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "max_tokens": 5,
+                },
+                timeout=httpx.Timeout(30.0),
+            )
+        except Exception as exc:  # noqa: BLE001 - a failed probe is reported, never raised
+            return {"status": "error", "message": self._redact(f"{type(exc).__name__}: {exc}")}
+        if resp.status_code == 200:
+            return {"status": "ok", "message": "model responded to a test call."}
+        return {"status": "error", "message": self._http_error(resp).user_message()}
 
     def chat_complete(
         self,

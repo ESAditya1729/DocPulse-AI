@@ -182,6 +182,22 @@ def test_404_is_reported_as_a_config_error_naming_the_namespace(http):
     assert "chat-models" in excinfo.value.message
 
 
+def test_404_about_a_missing_model_points_at_the_model(http):
+    """A model-shaped 404 must not be blamed on the endpoint URL or namespace."""
+    http.post.return_value = httpx.Response(
+        status_code=404,
+        json={"detail": "Model 'does-not-exist' not found"},
+        request=httpx.Request("POST", CHAT_URL),
+    )
+
+    with pytest.raises(ConfigError) as excinfo:
+        build_client(model_id="does-not-exist").chat_complete(messages=[{"role": "user", "content": "hi"}])
+
+    assert "does-not-exist" in excinfo.value.message
+    assert "not found" in excinfo.value.message
+    assert "DOCPULSE_MODEL_ID" in (excinfo.value.hint or "")
+
+
 def test_timeouts_become_gateway_errors_naming_the_limit(http):
     http.post.side_effect = httpx.TimeoutException("read timed out")
 
@@ -249,3 +265,44 @@ def test_check_health_reports_rather_than_raises(http):
 
     assert status["status"] == "error"
     assert "refused" in status["message"]
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"data": [{"id": "a"}]}, ["a"]),
+        ({"models": [{"name": "b"}]}, ["b"]),
+        ({"items": [{"id": "c"}]}, ["c"]),
+        ([{"id": "d"}], ["d"]),
+        ({"data": ["e"]}, ["e"]),
+        ({"unexpected": 1}, []),
+    ],
+)
+def test_list_models_normalizes_response_shapes(http, payload, expected):
+    http.get.return_value = httpx.Response(
+        status_code=200, json=payload, request=httpx.Request("GET", "https://gateway.example.com/v1/chat-models/models")
+    )
+
+    models = build_client().list_models()
+
+    assert [m.get("id") or m.get("name") for m in models] == expected
+
+
+def test_probe_chat_ok_when_the_model_answers(http):
+    http.post.return_value = make_response()
+
+    assert build_client().probe_chat()["status"] == "ok"
+
+
+def test_probe_chat_reports_an_unusable_model(http):
+    """check_health passes on /models; probe_chat must catch a model that does not."""
+    http.post.return_value = httpx.Response(
+        status_code=404,
+        json={"detail": "Model 'ghost' not found"},
+        request=httpx.Request("POST", CHAT_URL),
+    )
+
+    result = build_client(model_id="ghost").probe_chat()
+
+    assert result["status"] == "error"
+    assert "not found" in result["message"]

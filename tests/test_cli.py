@@ -138,6 +138,7 @@ def test_cli_init_command(mock_client_cls, tmp_path):
         "code": 200,
         "models_count": 5,
     }
+    mock_client.probe_chat.return_value = {"status": "ok"}
     mock_client_cls.return_value = mock_client
 
     # Interactive inputs: endpoint, api_key, namespace, model_id
@@ -155,6 +156,7 @@ def test_cli_init_warns_on_unknown_model_but_allows_override(mock_client_cls, tm
     mock_client = MagicMock()
     mock_client.list_models.return_value = [{"id": "known-model-a"}, {"id": "known-model-b"}]
     mock_client.check_health.return_value = {"status": "ok", "endpoint": "https://gateway.example.com/v1", "code": 200}
+    mock_client.probe_chat.return_value = {"status": "ok"}
     mock_client_cls.return_value = mock_client
 
     # endpoint, api_key, namespace, model_id (typo'd/unknown), confirm "use it anyway" = yes
@@ -173,6 +175,7 @@ def test_cli_init_accepts_known_model_without_warning(mock_client_cls, tmp_path)
     mock_client = MagicMock()
     mock_client.list_models.return_value = [{"id": "known-model-a"}, {"id": "known-model-b"}]
     mock_client.check_health.return_value = {"status": "ok", "endpoint": "https://gateway.example.com/v1", "code": 200}
+    mock_client.probe_chat.return_value = {"status": "ok"}
     mock_client_cls.return_value = mock_client
 
     inputs = "https://gateway.example.com/v1\ntest-api-key\nchat-models\nknown-model-a\n"

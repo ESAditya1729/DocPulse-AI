@@ -329,10 +329,12 @@ def init():
             model_id="",
         )
     )
+    discovery_error: str | None = None
     try:
         discovered_models = temp_client.list_models()
-    except Exception:  # noqa: BLE001 - discovery is a convenience; the health check below is authoritative
+    except Exception as exc:  # noqa: BLE001 - discovery is a convenience; the health check below is authoritative
         discovered_models = []
+        discovery_error = str(getattr(exc, "message", None) or exc)
 
     valid_model_ids = {m.get("id") or m.get("name") for m in discovered_models if isinstance(m, dict)} - {None}
 
@@ -346,6 +348,11 @@ def init():
             first_id = discovered_models[0].get("id") if isinstance(discovered_models[0], dict) else None
             if first_id:
                 default_model = first_id
+    elif discovery_error:
+        console.print(
+            f"[yellow]Warning:[/yellow] Could not list models from the gateway ({discovery_error})."
+        )
+        console.print("[dim]Enter the model/worker ID manually; 'docpulse doctor' can verify it afterwards.[/dim]")
 
     while True:
         model_id = Prompt.ask(
@@ -382,6 +389,13 @@ def init():
     if health["status"] == "ok":
         models_info = f" ({health.get('models_count', 0)} items available)" if "models_count" in health else ""
         console.print(f"[bold green]✓ Connection successful![/bold green] Endpoint: {health.get('endpoint')}{models_info}")
+        with console.status(f"[bold green]Verifying model '{new_config.model_id}'...", spinner="dots"):
+            model_check = client.probe_chat()
+        if isinstance(model_check, dict) and model_check.get("status") == "ok":
+            console.print(f"[green]✓[/green] Model [bold]{new_config.model_id}[/bold] responded to a test call.")
+        else:
+            message = model_check.get("message") if isinstance(model_check, dict) else model_check
+            console.print(f"[yellow]! Model check:[/yellow] {message}")
     elif health["status"] == "warning":
         console.print(f"[bold yellow]! Notice:[/bold yellow] {health.get('message')}")
     else:

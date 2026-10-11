@@ -112,7 +112,7 @@ The legacy aliases `ICA_ENDPOINT_URL`, `ICA_API_KEY`, `ICA_NAMESPACE`, and `ICA_
 ```bash
 docpulse init
 ```
-Interactive setup — enter your endpoint, optional API key, namespace, and model ID. Verifies gateway connectivity before saving.
+Interactive setup — enter your endpoint, optional API key, namespace, and model ID. Verifies gateway connectivity and confirms the selected model responds to a test call before saving, so a listed-but-unusable model is caught up front. If the gateway's model list can't be fetched, the reason is reported instead of silently showing nothing.
 
 ---
 
